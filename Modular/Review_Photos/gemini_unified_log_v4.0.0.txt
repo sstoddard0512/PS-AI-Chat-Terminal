@@ -1,0 +1,25 @@
+
+
+
+
+
+
+--- Turn 1 (05/03/2025 14:32:53) - API ERROR ---
+You:
+hi
+
+ERROR:
+Status:200 Err: Body:
+---
+
+
+--- Turn 1 (05/03/2025 14:35:01) - API ERROR ---
+You:
+hi
+
+ERROR:
+Status:200 Err: Body:
+---
+
+
+
