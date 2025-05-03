@@ -144,14 +144,35 @@ function Handle-ChatCommand {
         }
         '/(generate|image)(\s+(.+))?$' { # Prompt optional
             $cmd=$Matches[1]; if(-not(Ensure-VertexAiConfig -Ses $SessionConfigRef)){$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes}; $sessionConfig=$SessionConfigRef.Value;
-            $prompt = $null; if($Matches[3]){$prompt=$Matches[3].Trim()}else{$prompt=Read-Host "Enter prompt for /$cmd";if(-not $prompt){Write-Warning "Prompt empty.";$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes}}
+            $prompt = $null;
+            # Check if prompt was provided in the command ($Matches[3] corresponds to the (.+) part)
+            if($Matches[3]){$prompt=$Matches[3].Trim()}else{$prompt=Read-Host "Enter prompt for /$cmd";if(-not $prompt){Write-Warning "Prompt empty. Command cancelled.";$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes}}
+
             Write-Host "/$cmd command detected"-F Magenta;Write-Host "Prompt: $prompt"-F Magenta;$vParams=@{ProjectId=$sessionConfig.VertexProjectId;LocationId=$sessionConfig.VertexLocationId;Prompt=$prompt;OutputFolder=$sessionConfig.VertexDefaultOutputFolder;ModelId=$sessionConfig.VertexImageModel};if($sessionConfig.Verbose){$vParams.Verbose=$true};Start-VertexImageGeneration @vParams;$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true
         }
         '^/generate_from(\s+(.+))?$' { # Path optional
             if(-not(Ensure-VertexAiConfig -Ses $SessionConfigRef)){$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes}; $sessionConfig=$SessionConfigRef.Value;
             $inpPath=$null; if($Matches[2]){$inpPath=$Matches[2].Trim('"').Trim("'")}else{$inpPath=Read-Host "Enter source path for /generate_from";if(-not $inpPath){Write-Warning "Path empty.";$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes};$inpPath=$inpPath.Trim('"').Trim("'")}
             $srcPaths=[System.Collections.ArrayList]::new();if(Test-Path -Lit $inpPath -PathType Leaf){[void]$srcPaths.Add($inpPath);Write-Host "`n--- Gen From File: '$inpPath' ---"-F Yellow}elseif(Test-Path -Lit $inpPath -PathType Container){$imgExt=@('.jpg','.jpeg','.png','.webp','.gif','.heic','.heif','.bmp','.tif','.tiff');$found=Get-ChildItem -Lit $inpPath -File|?{$imgExt -contains $_.Extension.ToLowerInvariant()};if($found){$found|%{[void]$srcPaths.Add($_.FullName)};Write-Host "`n--- Gen From Folder: '$inpPath' ($($found.Count) images) ---"-F Yellow}else{Write-Error "No images in '$inpPath'."}}else{Write-Error "Path invalid: '$inpPath'"}
-            if($srcPaths.Count -eq 0){$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes};$idx=0;foreach($curPath in $srcPaths){$idx++;Write-Host "`nProcessing image $idx/$($srcPaths.Count): '$curPath'"-F Cyan;$descPrompt="Describe image vividly for AI generation.";Write-Host "Asking Gemini..."-F DarkGray;$dParams=@{ApiKey=$ApiKey;Model=$sessionConfig.Model;Prompt=$descPrompt;InlineFilePaths=@($curPath);ConversationHistory=@();TimeoutSec=$sessionConfig.TimeoutSec};if($sessionConfig.GenConfig){$dParams.GenerationConfig=$sessionConfig.GenConfig};$dRes=Invoke-GeminiApi @dParams;if(-not $dRes.Success){Write-Error "Failed get desc for '$curPath'.";continue};$gDesc=$dRes.GeneratedText;Write-Host "Gemini Desc:"-F Green;Write-Host $gDesc -F Green;Write-Host "`nGenerating from desc..."-F Yellow;$vParams=@{ProjectId=$sessionConfig.VertexProjectId;LocationId=$sessionConfig.VertexLocationId;Prompt=$gDesc;OutputFolder=$sessionConfig.VertexDefaultOutputFolder;ModelId=$sessionConfig.VertexImageModel};if($sessionConfig.Verbose){$vParams.Verbose=$true};Start-VertexImageGeneration @vParams;if($sessionConfig.FileDelaySec -gt 0 -and $idx -lt $srcPaths.Count){Start-Sleep -Sec $sessionConfig.FileDelaySec}};$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true}
+            if($srcPaths.Count -eq 0){$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes};
+            $lastGeneratedDescription = $null # Variable to store the last description
+            $idx=0;foreach($curPath in $srcPaths){
+                $idx++;Write-Host "`nProcessing image $idx/$($srcPaths.Count): '$curPath'"-F Cyan;$descPrompt="Describe image vividly for AI generation.";Write-Host "Asking Gemini..."-F DarkGray;$dParams=@{ApiKey=$ApiKey;Model=$sessionConfig.Model;Prompt=$descPrompt;InlineFilePaths=@($curPath);ConversationHistory=@();TimeoutSec=$sessionConfig.TimeoutSec};if($sessionConfig.GenConfig){$dParams.GenerationConfig=$sessionConfig.GenConfig};$dRes=Invoke-GeminiApi @dParams;if(-not $dRes.Success){Write-Error "Failed get desc for '$curPath'.";continue};
+                $lastGeneratedDescription=$dRes.GeneratedText; # Store the description
+                Write-Host "Gemini Desc:"-F Green;Write-Host $lastGeneratedDescription -F Green;Write-Host "`nGenerating from desc..."-F Yellow;$vParams=@{ProjectId=$sessionConfig.VertexProjectId;LocationId=$sessionConfig.VertexLocationId;Prompt=$lastGeneratedDescription;OutputFolder=$sessionConfig.VertexDefaultOutputFolder;ModelId=$sessionConfig.VertexImageModel};if($sessionConfig.Verbose){$vParams.Verbose=$true};Start-VertexImageGeneration @vParams;if($sessionConfig.FileDelaySec -gt 0 -and $idx -lt $srcPaths.Count){Start-Sleep -Sec $sessionConfig.FileDelaySec}
+            }
+            # After processing all images, use the last description as the next prompt
+            if ($lastGeneratedDescription) {
+                $cmdRes.PromptOverride = $lastGeneratedDescription
+                $cmdRes.CommandExecuted = $true
+                $cmdRes.SkipApiCall = $false # Allow the main loop to call Gemini API
+            } else {
+                # If no description was generated (e.g., all image descriptions failed)
+                Write-Warning "Could not generate a description from the source(s)."
+                $cmdRes.CommandExecuted = $true
+                $cmdRes.SkipApiCall = $true # Skip API call if no description
+            }
+        }
         '^/help$' {
             # Display Help Text (Copied from Get-ChatInput initial display)
             Write-Host "`n--- Available Commands ---" -ForegroundColor Yellow
