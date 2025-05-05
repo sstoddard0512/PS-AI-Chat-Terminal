@@ -33,7 +33,7 @@ function Start-GeminiChat {
     [CmdletBinding()]
     param(
         # --- Parameters (identical to original script v3.5.11) ---
-        [Parameter(Mandatory=$true, HelpMessage = "Your Google Gemini API Key.")] [string]$ApiKey,
+        [Parameter(HelpMessage = "Your Google Gemini API Key.")] [string]$ApiKey,
         [Parameter(HelpMessage = "The Gemini model to use.")] [string]$Model = 'gemini-1.5-pro-latest',
         [Parameter(HelpMessage = "Optional hashtable for generation configuration.")] [hashtable]$GenerationConfig,
         [Parameter(HelpMessage = "Timeout for API requests in seconds.")] [int]$TimeoutSec = 300,
@@ -47,7 +47,7 @@ function Start-GeminiChat {
         [Parameter(HelpMessage = "If specified with -ModifyFiles, requires user confirmation before applying changes.")] [switch]$Confirm,
         [Parameter(HelpMessage = "Update 'Title' metadata (requires -ModifyFiles).")] [switch]$UpdateTitle,
         [Parameter(HelpMessage = "Replace 'Creator'/'Artist' metadata (requires -ModifyFiles, -AuthorName).")] [switch]$UpdateAuthor,
-        [Parameter(Mandatory = $false, HelpMessage = "Author name for -UpdateAuthor.")] [string]$AuthorName,
+        [Parameter(HelpMessage = "Author name for -UpdateAuthor.")] [string]$AuthorName,
         [Parameter(HelpMessage = "Update 'Comment' metadata from Title (requires -ModifyFiles).")] [switch]$UpdateSubject,
         [Parameter(HelpMessage = "Parse 'Tags:'/'Keywords:' and overwrite metadata (requires -ModifyFiles & ExifTool).")] [switch]$UpdateTags,
         [Parameter(HelpMessage = "Parse 'Rating:' and update metadata/append to filename (requires -ModifyFiles).")] [switch]$UpdateRating,

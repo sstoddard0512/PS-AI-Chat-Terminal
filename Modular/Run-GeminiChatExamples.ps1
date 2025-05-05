@@ -32,9 +32,9 @@ No other text, Analyze the provided file:
 3. Rating: (Suggest 0-5 quality rating)
 4. Tags: (Suggest 30-50 keywords: main subject, elements, location, actions, concepts, demographics, technical, format)
 "@
-$myMediaFolder = Join-Path -Path $PSScriptRoot -ChildPath 'Review_Photos' # Use script's directory
+$myMediaFolder = "G:\My Drive\All Life Matters\Videos\20250503_231754.mp4" # Use script's directory
 $myLogFile = Join-Path $myMediaFolder "gemini_unified_log_v4.0.0.txt"
-$myAuthor = "PowerShell User"
+$myAuthor = "Steven Stoddard"
 $vertexProjectID = "vertex-image-generation" # <-- IMPORTANT: Replace with your GCP Project ID or leave blank to be prompted
 $vertexLocationId = "us-central1" # Common default
 $vertexDefaultOutputFolder = Join-Path $myMediaFolder "GeneratedImages"
@@ -52,8 +52,8 @@ $ExifToolPath = "" # Leave blank to search PATH, or specify full path e.g., "C:\
 $apiKey = $env:GEMINI_API_KEY
 if ([string]::IsNullOrWhiteSpace($apiKey)) {
     Write-Warning "`$env:GEMINI_API_KEY not set. You will be prompted by Start-GeminiChat."
-    # Start-GeminiChat will handle prompting if $apiKey is passed as $null or empty
-} else {
+    $apiKey = $null # Explicitly set to $null so parameter binding doesn't fail
+} else { # API Key WAS found in environment variable
     Write-Host "Using API Key from `$env:GEMINI_API_KEY." -ForegroundColor DarkGray
 }
 
