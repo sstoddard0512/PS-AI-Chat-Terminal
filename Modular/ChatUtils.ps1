@@ -27,7 +27,7 @@ function Get-ChatInput {
         Write-Host "  /save         - Save history to CSV (if -CsvOutputFile specified)." -ForegroundColor Cyan
         Write-Host "  /media [path] - Add media (folder/file) for the next prompt. If no path, prompts interactively." -ForegroundColor Cyan
         Write-Host "  /generate ... - Generate an image via Vertex AI. Prompts if prompt is missing." -ForegroundColor Cyan
-        Write-Host "  /generate_from <path> - Describe image(s) at <path>, then generate new image(s). Prompts if path is missing." -ForegroundColor Cyan
+        Write-Host "  /generate_from <path> - Describe image(s) at <path>, then generate new image(s). Prompts if path is missing or uses session media." -ForegroundColor Cyan
         Write-Host "  /model [name] - Change the Gemini model. If no name, shows list." -ForegroundColor Cyan
         Write-Host "  /imagemodel [name] - Change the Vertex AI image generation model. If no name, shows list." -ForegroundColor Cyan
         Write-Host "  /exit         - Exit the chat session." -ForegroundColor Cyan
@@ -197,7 +197,7 @@ function Handle-ChatCommand {
     if(-not $TrimmedInput.StartsWith('/')){return $cmdRes}
     switch -Regex ($TrimmedInput){
         '^/(history|hist)$'{Write-Host "`n--- History ---"-F Yellow;if($conversationHistory.Count-eq 0){Write-Host "(Empty)"-F Gray}else{for($i=0;$i-lt $conversationHistory.Count;$i++){$t=$conversationHistory[$i];$r=$t.role.ToUpper();$txt=($t.parts|?{$_.text}|select -Exp text)-join "`n";$m=if($t.parts|?{$_.inline_data}){"(Inline)"}elseif($t.parts|?{$_.file_data}){"(FileAPI)"}else{""};Write-Host "[$r]$txt$m"-F (if($r-eq 'USER'){[ConsoleColor]::White}else{[ConsoleColor]::Green})}};Write-Host "---"-F Yellow;$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true}
-        '^/clear$'{Write-Host "`nClearing history."-F Yellow;$ConversationHistoryRef.Value=@();$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true} # Note: Caller must clear last prompt/result if needed
+        '^/clear$'{Write-Host "`nClearing history."-F Yellow;$ConversationHistoryRef.Value = [System.Collections.ArrayList]::new();$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true} # Note: Caller must clear last prompt/result if needed
         '^/retry$'{if($LastApiResult -and -not $LastApiResult.Success -and $LastUserPrompt){Write-Host "`nRetrying..."-F Yellow;Write-Host "Prompt: $LastUserPrompt"-F Gray;$cmdRes.PromptOverride=$LastUserPrompt;$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$false}else{Write-Warning "Nothing to retry.";$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true}}
         '^/config$'{Write-Host "`n--- Config ---"-F Yellow;$sessionConfig.GetEnumerator()|Sort Name|% { $val = if($_.Value -ne $null){($_.Value|Out-String -Stream).Trim()}else{"(null)"}; Write-Host ("{0,-25}: {1}"-f $_.Name,$val)};Write-Host "---"-F Yellow;$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true}
         '^/save$'{Write-Host "`nSaving history..."-F Yellow;if($sessionConfig.CsvOutputFile -and $conversationHistory.Count -gt 0){Save-ChatToCsv -ConversationHistory $conversationHistory -CsvOutputFile $sessionConfig.CsvOutputFile}elseif(-not $sessionConfig.CsvOutputFile){Write-Warning "No -CsvOutputFile."}else{Write-Warning "History empty."};$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true}
@@ -286,7 +286,7 @@ function Handle-ChatCommand {
                                     $trimmedLowerR = $r.Trim().ToLowerInvariant()
                                     if ($trimmedLowerR -eq '/back') {
                                         Write-Host "(Input cancelled)" -F Gray
-                                        $recursivePromptCancelled = $true
+                                        $recursivePromptCancelled = true
                                         break
                                     }
                                     if ([string]::IsNullOrWhiteSpace($trimmedLowerR) -or $trimmedLowerR -eq 'y' -or $trimmedLowerR -eq 'n') {
@@ -346,7 +346,7 @@ function Handle-ChatCommand {
                     $cmdRes.PromptOverride = $promptForMediaText # Tell main loop to use this prompt
                     $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $false # Allow API call with this media/prompt
                 } else {
-                    $mediaAddedSuccessfully = $false # Mark overall media addition as failed
+                    $mediaAddedSuccessfully = false # Mark overall media addition as failed
                     $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $true
                 }
             }
@@ -429,58 +429,183 @@ function Handle-ChatCommand {
                 if(-not $prompt){Write-Warning "Prompt empty. Command cancelled.";$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes}
             }
 
-            Write-Host "/$cmd command detected"-F Magenta;Write-Host "Prompt: $prompt"-F Magenta;
+            $fullCommandText = "/$cmd $prompt" # Store the full command text
+            Write-Host "$fullCommandText command detected"-F Magenta; # Use full command text
+            
+            # Add user command to history
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = $fullCommandText}) })
+            Write-Verbose "Added user command '$fullCommandText' to history."
+
             $vParams=@{ProjectId=$sessionConfig.VertexProjectId;LocationId=$sessionConfig.VertexLocationId;Prompt=$prompt;OutputFolder=$sessionConfig.VertexDefaultOutputFolder;ModelId=$sessionConfig.VertexImageModel};
             if($IsVerbose){$vParams.Verbose=$true};
-            # Call the function and discard any return value to prevent it from printing to console
-            Start-VertexImageGeneration @vParams | Out-Null;
+            
+            $generatedImagePaths = Start-VertexImageGeneration @vParams # Capture returned paths
+            
+            if ($generatedImagePaths -and $generatedImagePaths.Count -gt 0) {
+                $imagePathsString = $generatedImagePaths -join ", "
+                $modelResponseText = "Image(s) generated: $imagePathsString"
+                [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = $modelResponseText}) })
+                Write-Verbose "Added image generation result to history: $modelResponseText"
+            } else {
+                $modelResponseText = "Image generation initiated for '$prompt'. Check output folder. (No specific paths returned or generation failed)."
+                [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = $modelResponseText}) })
+                Write-Verbose "Added image generation placeholder to history."
+            }
+            
             $cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true
         }
         '^/generate_from(\s+(.+))?$' { # Path is optional
             if(-not(Ensure-VertexAiConfig -Ses $SessionConfigRef)){$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes}; $sessionConfig=$SessionConfigRef.Value;
-            $inpPath=$null;
-            # Loop for Generate_From Path
-            if($Matches[2]){$inpPath=$Matches[2].Trim('"').Trim("'")}
-            else {
-                while ($true) {
-                    $inpPath = Read-Host "Enter source path for /generate_from (or /back to cancel)"
-                    if ($inpPath.Trim().ToLowerInvariant() -eq '/back') {
-                        Write-Host "(Input cancelled)" -F Gray
-                        $inpPath = $null
-                        $cmdRes.CommandExecuted=$true; $cmdRes.SkipApiCall=$true # Set flags before returning
-                        return $cmdRes
-                    }
-                    if (-not ([string]::IsNullOrWhiteSpace($inpPath))) { break }
-                    Write-Warning "Path cannot be empty. Please try again."
+            
+            $inpPath = $null # Initialize $inpPath
+            $initialPathArgument = if ($Matches[2]) { $Matches[2].Trim('"').Trim("'") } else { $null }
+
+            if ($initialPathArgument) {
+                # An argument was provided. Validate it.
+                if (Test-Path -LiteralPath $initialPathArgument -PathType Leaf -ErrorAction SilentlyContinue) {
+                    $inpPath = $initialPathArgument
+                    Write-Verbose "[/generate_from] Using valid file path provided with command: '$inpPath'"
+                } elseif (Test-Path -LiteralPath $initialPathArgument -PathType Container -ErrorAction SilentlyContinue) {
+                    $inpPath = $initialPathArgument
+                    Write-Verbose "[/generate_from] Using valid folder path provided with command: '$inpPath'"
+                } else {
+                    # The provided path argument is invalid.
+                    Write-Warning "The path '$initialPathArgument' provided with /generate_from is invalid. Please enter a valid path below or use the default."
+                    # $inpPath remains $null, so it will fall into the prompting logic below.
                 }
             }
-            if (-not $inpPath) { Write-Warning "Path empty."; $cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes } # Should not happen with loop, but safety check
-            $inpPath=$inpPath.Trim('"').Trim("'")
 
-            $srcPaths=[System.Collections.ArrayList]::new();if(Test-Path -Lit $inpPath -PathType Leaf){[void]$srcPaths.Add($inpPath);Write-Host "`n--- Gen From File: '$inpPath' ---"-F Yellow}elseif(Test-Path -Lit $inpPath -PathType Container){$imgExt=@('.jpg','.jpeg','.png','.webp','.gif','.heic','.heif','.bmp','.tif','.tiff');$found=Get-ChildItem -Lit $inpPath -File|?{$imgExt -contains $_.Extension.ToLowerInvariant()};if($found){$found|%{[void]$srcPaths.Add($_.FullName)};Write-Host "`n--- Gen From Folder: '$inpPath' ($($found.Count) images) ---"-F Yellow}else{Write-Error "No images in '$inpPath'."}}else{Write-Error "Path invalid: '$inpPath'"}
+            if (-not $inpPath) { # If no argument OR invalid argument, then prompt.
+                $validSessionMediaDefault = $null
+                if (-not [string]::IsNullOrWhiteSpace($sessionConfig.Media)) {
+                    Write-Verbose "[/generate_from] Checking sessionConfig.Media for default: '$($sessionConfig.Media)'"
+                    if (Test-Path -LiteralPath $sessionConfig.Media) {
+                        $validSessionMediaDefault = $sessionConfig.Media
+                    } else {
+                        Write-Warning "Session media path '$($sessionConfig.Media)' is invalid and cannot be used as a default."
+                    }
+                }
 
-            if($srcPaths.Count -eq 0){$cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes}
+                # Construct the prompt message
+                $promptMessage = "Enter source path for /generate_from"
+                if ($validSessionMediaDefault) {
+                    $promptMessage += " (default: '$validSessionMediaDefault')"
+                }
+                $promptMessage += " (or /back to cancel)"
+
+                # Loop for path input
+                while ($true) {
+                    $userInputPath = Read-Host $promptMessage
+                    $trimmedUserInput = $userInputPath.Trim()
+                    $lowerTrimmedUserInput = $trimmedUserInput.ToLowerInvariant()
+
+                    if ($lowerTrimmedUserInput -eq '/back') {
+                        Write-Host "(Input cancelled)" -F Gray
+                        # $inpPath remains null, will be caught by the check below
+                        break 
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($trimmedUserInput)) {
+                        if ($validSessionMediaDefault) {
+                            $inpPath = $validSessionMediaDefault
+                            Write-Host "Using default path: '$inpPath'" -ForegroundColor Gray
+                            break
+                        } else {
+                            Write-Warning "Path cannot be empty. Please try again."
+                        }
+                    } else {
+                        # User typed a path, validate it here before accepting
+                        $potentialPath = $trimmedUserInput.Trim('"').Trim("'")
+                        if ((Test-Path -LiteralPath $potentialPath -PathType Leaf -ErrorAction SilentlyContinue) -or `
+                            (Test-Path -LiteralPath $potentialPath -PathType Container -ErrorAction SilentlyContinue)) {
+                            $inpPath = $potentialPath
+                            break
+                        } else {
+                            Write-Warning "The path '$potentialPath' entered is not a valid file or folder. Please try again."
+                        }
+                    }
+                }
+            } # End of prompting block
+            
+            # Check if a path was successfully obtained (either from argument or prompt)
+            if ([string]::IsNullOrWhiteSpace($inpPath)) { 
+                Write-Warning "No valid path provided or selected for /generate_from. Command cancelled."
+                $cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes 
+            }
+            # At this point, $inpPath is non-empty and has passed at least one Test-Path check.
+
+            $fullCommandText = "/generate_from $inpPath"
+            # Add user command to history
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = $fullCommandText}) })
+            Write-Verbose "Added user command '$fullCommandText' to history."
+
+            $srcPaths=[System.Collections.ArrayList]::new()
+            # Now, determine if $inpPath (which should be valid) is a file or folder
+            if (Test-Path -LiteralPath $inpPath -PathType Leaf -ErrorAction SilentlyContinue) {
+                [void]$srcPaths.Add($inpPath)
+                Write-Host "`n--- Gen From File: '$inpPath' ---"-F Yellow
+            } elseif (Test-Path -LiteralPath $inpPath -PathType Container -ErrorAction SilentlyContinue) {
+                $imgExt=@('.jpg','.jpeg','.png','.webp','.gif','.heic','.heif','.bmp','.tif','.tiff')
+                $found=Get-ChildItem -LiteralPath $inpPath -File -ErrorAction SilentlyContinue | Where-Object {$imgExt -contains $_.Extension.ToLowerInvariant()}
+                if($found){
+                    $found | ForEach-Object {[void]$srcPaths.Add($_.FullName)}
+                    Write-Host "`n--- Gen From Folder: '$inpPath' ($($found.Count) images) ---"-F Yellow
+                } else {
+                    # Folder is valid but contains no suitable images. $srcPaths will be empty.
+                    Write-Warning "No supported image files found in folder '$inpPath'."
+                }
+            } else {
+                # This case should be rare if the above logic is sound.
+                # It implies $inpPath was non-empty, passed an initial Test-Path, but now fails for both Leaf and Container.
+                Write-Error "Path '$inpPath' is no longer valid or is of an unsupported type. Command cancelled."
+                $cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes
+            }
+
+            if($srcPaths.Count -eq 0){
+                Write-Warning "No source images to process from '$inpPath'. Command cancelled."
+                $cmdRes.CommandExecuted=$true;$cmdRes.SkipApiCall=$true;return $cmdRes
+            }
             $lastGeneratedDescription = $null # Variable to store the last description
+            $allGeneratedImagePaths = [System.Collections.ArrayList]::new() # To collect all paths from this command
+
             $idx=0;foreach($curPath in $srcPaths){
                 $idx++;Write-Host "`nProcessing image $idx/$($srcPaths.Count): '$curPath'"-F Cyan;$descPrompt="Describe image vividly for AI generation.";Write-Host "Asking Gemini..."-F DarkGray;$dParams=@{ApiKey=$ApiKey;Model=$sessionConfig.Model;Prompt=$descPrompt;InlineFilePaths=@($curPath);ConversationHistory=@();TimeoutSec=$sessionConfig.TimeoutSec};if($sessionConfig.GenConfig){$dParams.GenerationConfig=$sessionConfig.GenConfig};$dRes=Invoke-GeminiApi @dParams;if(-not $dRes.Success){Write-Error "Failed get desc for '$curPath'.";continue};
                 $lastGeneratedDescription=$dRes.GeneratedText; # Store the description
+                
+                $descHistoryText = "Description for '$curPath':`n$lastGeneratedDescription"
+                [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = $descHistoryText}) })
+                Write-Verbose "Added image description to history."
+
                 Write-Host "Gemini Desc:"-F Green;Write-Host $lastGeneratedDescription -F Green;Write-Host "`nGenerating from desc..."-F Yellow;
                 $vParams=@{ProjectId=$sessionConfig.VertexProjectId;LocationId=$sessionConfig.VertexLocationId;Prompt=$lastGeneratedDescription;OutputFolder=$sessionConfig.VertexDefaultOutputFolder;ModelId=$sessionConfig.VertexImageModel};
                 if($IsVerbose){$vParams.Verbose=$true};
-                # Call the function and discard any return value
-                Start-VertexImageGeneration @vParams | Out-Null;
+                
+                $newlyGeneratedPaths = Start-VertexImageGeneration @vParams # Capture paths
+                if ($newlyGeneratedPaths -and $newlyGeneratedPaths.Count -gt 0) {
+                    $newlyGeneratedPaths | ForEach-Object { [void]$allGeneratedImagePaths.Add($_) }
+                    $genImageHistoryText = "Image(s) generated from description of '$curPath': $($newlyGeneratedPaths -join ', ')"
+                    [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = $genImageHistoryText}) })
+                    Write-Verbose "Added generated image paths to history."
+                } else {
+                    $genImageHistoryText = "Image generation initiated from description of '$curPath'. Check output folder. (No specific paths returned or generation failed)."
+                    [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = $genImageHistoryText}) })
+                    Write-Verbose "Added image generation placeholder to history."
+                }
+
                 if($sessionConfig.FileDelaySec -gt 0 -and $idx -lt $srcPaths.Count){Start-Sleep -Sec $sessionConfig.FileDelaySec}
             }
             # After processing all images, use the last description as the next prompt
             if ($lastGeneratedDescription) {
                 $cmdRes.PromptOverride = $lastGeneratedDescription
+                # Even though we have a prompt override, we don't want to immediately call the API with it.
+                # The user can choose to use this context in their next manual prompt or /retry.
                 $cmdRes.CommandExecuted = $true
-                $cmdRes.SkipApiCall = $false # Allow the main loop to call Gemini API
+                $cmdRes.SkipApiCall = $true
             } else {
                 # If no description was generated (e.g., all image descriptions failed)
-                Write-Warning "Could not generate a description from the source(s)."
+                Write-Warning "Could not generate a description from the source(s) to use as a prompt."
                 $cmdRes.CommandExecuted = $true
-                $cmdRes.SkipApiCall = $true # Skip API call if no description
+                $cmdRes.SkipApiCall = $true
             }
         }
          '^/help$' {
@@ -493,7 +618,7 @@ function Handle-ChatCommand {
             Write-Host "  /save         - Save history to CSV (if -CsvOutputFile specified)." -ForegroundColor Cyan
             Write-Host "  /media [path] - Add media (folder/file) for the next prompt. If no path, prompts interactively." -ForegroundColor Cyan
             Write-Host "  /generate ... - Generate an image via Vertex AI. Prompts if prompt is missing." -ForegroundColor Cyan
-            Write-Host "  /generate_from <path> - Describe image(s) at <path>, then generate new image(s). Prompts if path is missing." -ForegroundColor Cyan
+            Write-Host "  /generate_from <path> - Describe image(s) at <path>, then generate new image(s). Prompts if path is missing or uses session media." -ForegroundColor Cyan
             Write-Host "  /model [name] - Change the Gemini model. If no name, shows list." -ForegroundColor Cyan
             Write-Host "  /imagemodel [name] - Change the Vertex AI image generation model. If no name, shows list." -ForegroundColor Cyan
             Write-Host "  /exit         - Exit the chat session." -ForegroundColor Cyan

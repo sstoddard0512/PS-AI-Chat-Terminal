@@ -28,13 +28,13 @@ function Start-VertexImageGeneration {
     # Check for critical Sanitize-Filename dependency again inside the function if not globally checked
     if (-not (Get-Command Sanitize-Filename -ErrorAction SilentlyContinue)) {
         Write-Error "CRITICAL: Sanitize-Filename function is not available. Please load CoreUtils.ps1 or ensure the function is defined."
-        return
+        return # Return an empty array or specific error object if desired
     }
 
     $gcloudPath = Get-Command gcloud -ErrorAction SilentlyContinue
     if (-not $gcloudPath) {
         Write-Error "gcloud CLI not found in PATH. Please ensure it is installed and accessible."
-        return
+        return # Return an empty array or specific error object
     }
     Write-Verbose "Using gcloud: $($gcloudPath.Path)"
 
@@ -73,7 +73,7 @@ function Start-VertexImageGeneration {
         Write-Error "[Start-VertexImageGeneration] Failed to get gcloud access token: $($_.Exception.Message)"
         # For debugging, it might be useful to see the type of $gcloudRawOutput if an error occurs before this point
         if ($PSBoundParameters.ContainsKey('Verbose') -and $gcloudRawOutput) { Write-Verbose "[DEBUG Start-VertexImageGeneration] Type of gcloudRawOutput: $($gcloudRawOutput.GetType().FullName); Value: $gcloudRawOutput" }
-        return
+        return # Return an empty array or specific error object
     }
 
     try {
@@ -84,13 +84,13 @@ function Start-VertexImageGeneration {
                 Write-Verbose "Output folder '$OutputFolder' created."
             } else {
                 Write-Warning "Creation of output folder '$OutputFolder' skipped due to -WhatIf."
-                return # Cannot proceed without output folder
+                return # Return an empty array or specific error object
             }
         }
     }
     catch {
         Write-Error "[Start-VertexImageGeneration] Failed to create or access output folder '$OutputFolder': $($_.Exception.Message)"
-        return
+        return # Return an empty array or specific error object
     }
     
     $apiUrl = "https://$($LocationId)-aiplatform.googleapis.com/v1/projects/$($ProjectId)/locations/$($LocationId)/publishers/google/models/$($ModelId):predict"
@@ -139,7 +139,7 @@ function Start-VertexImageGeneration {
     $response = $null
     if (-not $PSCmdlet.ShouldProcess($apiUrl, "Invoke POST Request to Vertex AI Imagen API")) {
         Write-Warning "API call skipped due to -WhatIf."
-        return
+        return @() # Return empty array for -WhatIf
     }
 
     try {
@@ -165,7 +165,7 @@ function Start-VertexImageGeneration {
             }
             catch { Write-Warning "Could not read error response body: $($_.Exception.Message)" }
         } else { Write-Warning "No response object available in the exception." }
-        return
+        return @() # Return empty array on failure
     }
     catch {
         $exception = $_.Exception
@@ -202,7 +202,7 @@ function Start-VertexImageGeneration {
             Write-Error $errorMessage # For non-HTTP related errors
         }
         Write-Verbose "[Start-VertexImageGeneration] Full exception details for unexpected API call error: $($exception | Format-List * -Force | Out-String)"
-        return
+        return @() # Return empty array on failure
     }
 
     # Enhanced pre-check logging for the main 'if' condition
@@ -231,6 +231,9 @@ function Start-VertexImageGeneration {
         Write-Verbose "[Start-VertexImageGeneration] Debug: `$response is `$null."
     }
     Write-Verbose "[Start-VertexImageGeneration] Debug pre-check values: predictionsExist=$debug_predictionsExist, isPredictionsArray=$debug_isPredictionsArray, predictionsCount=$debug_predictionsCount"
+
+    # Initialize an array to store paths of successfully saved images
+    $savedImagePaths = [System.Collections.ArrayList]::new()
 
     if ($debug_predictionsExist -and $debug_isPredictionsArray -and $debug_predictionsCount -gt 0) {
         Write-Host "Vertex API successful. Processing $($response.predictions.Count) image(s)..." -ForegroundColor Green
@@ -270,6 +273,7 @@ function Start-VertexImageGeneration {
                         [System.IO.File]::WriteAllBytes($currentOutPath, $bytes)
                         Write-Verbose "[Start-VertexImageGeneration] Call to [IO.File]::WriteAllBytes for '$currentOutPath' completed."
                         Write-Host "Saved image: $currentOutPath" -ForegroundColor DarkGreen
+                        [void]$savedImagePaths.Add($currentOutPath) # Add successfully saved path
 
                         # Pause briefly for filesystem to catch up before trying to open the file.
                         # This can help avoid "file not found" errors on some systems when opening immediately after writing.
@@ -352,6 +356,7 @@ function Start-VertexImageGeneration {
         Write-Warning $warningMessage
         Write-Verbose "Full Response: $($response | ConvertTo-Json -Depth 5)"
     }
+    return $savedImagePaths.ToArray() # Return the array of saved image paths
 }
 
 Write-Verbose "VertexApiUtils.ps1 loaded."

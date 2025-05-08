@@ -52,7 +52,7 @@ function Invoke-GeminiApi {
     param(
         [Parameter(Mandatory = $true)] [string]$ApiKey,
         [Parameter(Mandatory = $true)] [string]$Prompt,
-        [array]$ConversationHistory,
+        $ConversationHistory, # Removed [array] type constraint
         [string]$Model = 'gemini-1.5-pro-latest',
         [string]$ImageFolder,
         [string]$VideoFolder,
@@ -231,9 +231,16 @@ function Invoke-GeminiApi {
         }
 
         if ($response) {
-            if ($response.candidates[0]?.content?.parts[0]?.text) { $result.GeneratedText = $response.candidates[0].content.parts[0].text; $result.Success = $true; $result.StatusCode = 200; Write-Verbose "[Invoke-GeminiApi] Response parsed."; $modelResponseTurn = $response.candidates[0].content; [void]$currentHistoryPayload.Add($modelResponseTurn); $result.UpdatedConversationHistory = $currentHistoryPayload.ToArray() }
-            elseif ($response.promptFeedback?.blockReason) { $reason=$response.promptFeedback.blockReason;$ratings=$response.promptFeedback.safetyRatings|ConvertTo-Json -Depth 3 -Comp;$errMsg="[Invoke-GeminiApi] Blocked. Reason: $reason. Ratings: $ratings";Write-Error $errMsg;$result.ResponseBody=$response|ConvertTo-Json -Depth 10;$result.ErrorRecord=New-Object System.Management.Automation.ErrorRecord([System.Exception]::new($errMsg),"SafetyBlock",[System.Management.Automation.ErrorCategory]::PermissionDenied,$response);$result.StatusCode=200 }
-            else { Write-Warning "[Invoke-GeminiApi] Unexpected response structure."; $result.ResponseBody=$response|ConvertTo-Json -Depth 10;$result.StatusCode=200;$result.ErrorRecord=New-Object System.Management.Automation.ErrorRecord([System.Exception]::new("Unexpected API response."),"UnexpectedApiResponse",[System.Management.Automation.ErrorCategory]::InvalidData,$response) }
+            if ($response.candidates[0]?.content?.parts[0]?.text) {
+                $result.GeneratedText = $response.candidates[0].content.parts[0].text
+                $result.Success = $true
+                $result.StatusCode = 200
+                Write-Verbose "[Invoke-GeminiApi] Response parsed."
+                $modelResponseTurn = $response.candidates[0].content
+                [void]$currentHistoryPayload.Add($modelResponseTurn)
+                $result.UpdatedConversationHistory = $currentHistoryPayload # Return ArrayList
+            } elseif ($response.promptFeedback?.blockReason) { $reason=$response.promptFeedback.blockReason;$ratings=$response.promptFeedback.safetyRatings|ConvertTo-Json -Depth 3 -Comp;$errMsg="[Invoke-GeminiApi] Blocked. Reason: $reason. Ratings: $ratings";Write-Error $errMsg;$result.ResponseBody=$response|ConvertTo-Json -Depth 10;$result.ErrorRecord=New-Object System.Management.Automation.ErrorRecord([System.Exception]::new($errMsg),"SafetyBlock",[System.Management.Automation.ErrorCategory]::PermissionDenied,$response);$result.StatusCode=200; $result.UpdatedConversationHistory = $currentHistoryPayload } # Return current history (ArrayList)
+            else { Write-Warning "[Invoke-GeminiApi] Unexpected response structure."; $result.ResponseBody=$response|ConvertTo-Json -Depth 10;$result.StatusCode=200;$result.ErrorRecord=New-Object System.Management.Automation.ErrorRecord([System.Exception]::new("Unexpected API response."),"UnexpectedApiResponse",[System.Management.Automation.ErrorCategory]::InvalidData,$response); $result.UpdatedConversationHistory = $currentHistoryPayload } # Return current history (ArrayList)
         } elseif (-not $result.ErrorRecord) { Write-Error "[Invoke-GeminiApi] API call failed after retries."; $result.ErrorRecord = New-Object System.Management.Automation.ErrorRecord([System.Exception]::new("API retries failed."),"ApiRetryFailure",[System.Management.Automation.ErrorCategory]::OperationTimeout,$null) }
 
         Write-Verbose "[Invoke-GeminiApi] Function finished."
