@@ -30,6 +30,10 @@ function Get-ChatInput {
         Write-Host "  /generate_from <path> - Describe image(s) at <path>, then generate new image(s). Prompts if path is missing or uses session media." -ForegroundColor Cyan
         Write-Host "  /model [name] - Change the Gemini model. If no name, shows list." -ForegroundColor Cyan
         Write-Host "  /imagemodel [name] - Change the Vertex AI image generation model. If no name, shows list." -ForegroundColor Cyan
+        Write-Host "  /simulatechat [initial_prompt] - Start a role-playing simulation. Prompts for personas and turns." -ForegroundColor Cyan
+        Write-Host "  /tellajoke    - Ask Gemini to tell a joke." -ForegroundColor Cyan
+        Write-Host "  /rolldice [NdN] - Ask Gemini to narrate a dice roll (e.g., 2d6). Defaults to 1d6." -ForegroundColor Cyan
+        Write-Host "  /cointoss     - Perform a coin toss." -ForegroundColor Cyan
         Write-Host "  /exit         - Exit the chat session." -ForegroundColor Cyan
         Write-Host "  /back         - Cancel current input/selection prompt." -ForegroundColor Cyan
         Write-Host "  /help         - Show this command list." -ForegroundColor Cyan
@@ -608,6 +612,169 @@ function Handle-ChatCommand {
                 $cmdRes.SkipApiCall = $true
             }
         }
+        '^/simulatechat(\s+(.+))?$' { # Regex updated to capture optional prompt
+            $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $true
+
+            Write-Host "`n--- Chat Simulation ---" -ForegroundColor Magenta
+            
+            $initialSimPrompt = $null
+            $providedSimPrompt = if ($Matches[2]) { $Matches[2].Trim().Trim('"').Trim("'") } else { $null }
+
+            if ($providedSimPrompt) {
+                $initialSimPrompt = $providedSimPrompt
+                Write-Verbose "[/simulatechat] Using prompt provided with command: '$initialSimPrompt'"
+            } else {
+                while ($true) {
+                    $initialSimPrompt = Read-Host "Enter the initial message to start the simulation (or /back to cancel)"
+                    if ($initialSimPrompt.Trim().ToLowerInvariant() -eq '/back') {
+                        Write-Host "(Simulation cancelled)" -F Gray; return $cmdRes
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($initialSimPrompt)) { break }
+                    Write-Warning "Initial message cannot be empty. Please try again."
+                }
+            }
+
+            # Prompt for Persona Names
+            $personaAName = "Alice" # Default
+            $personaBName = "Bob"   # Default
+            while ($true) {
+                $inputNameA = Read-Host "Enter name for Persona A (default: '$personaAName', or /back)"
+                if ($inputNameA.Trim().ToLowerInvariant() -eq '/back') { Write-Host "(Simulation cancelled)" -F Gray; return $cmdRes }
+                if (-not [string]::IsNullOrWhiteSpace($inputNameA)) { $personaAName = $inputNameA.Trim(); break }
+                elseif ([string]::IsNullOrWhiteSpace($inputNameA)) { break } # Accept default
+            }
+            while ($true) {
+                $inputNameB = Read-Host "Enter name for Persona B (default: '$personaBName', or /back)"
+                if ($inputNameB.Trim().ToLowerInvariant() -eq '/back') { Write-Host "(Simulation cancelled)" -F Gray; return $cmdRes }
+                if (-not [string]::IsNullOrWhiteSpace($inputNameB)) { $personaBName = $inputNameB.Trim(); break }
+                elseif ([string]::IsNullOrWhiteSpace($inputNameB)) { break } # Accept default
+            }
+            if ($personaAName -eq $personaBName) { # Ensure different names for clarity
+                $personaBName = "$($personaBName)_2"
+                Write-Warning "Persona names were identical. Renamed Persona B to '$personaBName' for clarity."
+            }
+            Write-Host "Persona A: '$personaAName', Persona B: '$personaBName'" -F Gray
+
+            # Prompt for Number of Turns
+            $numberOfTurns = 0
+            while ($true) {
+                $turnInput = Read-Host "Enter total number of messages Gemini will generate in simulation (1-20, default 20 if empty, or /back)"
+                $trimmedTurnInput = $turnInput.Trim()
+                if ($trimmedTurnInput.ToLowerInvariant() -eq '/back') {
+                    Write-Host "(Simulation cancelled)" -F Gray; return $cmdRes
+                }
+                if ([string]::IsNullOrWhiteSpace($trimmedTurnInput)) { # User pressed Enter
+                    $numberOfTurns = 20
+                    Write-Host "Defaulting to 20 turns." -F Gray
+                    break
+                }
+                if ($trimmedTurnInput -match '^\d+$' -and ([int]$trimmedTurnInput -gt 0 -and [int]$trimmedTurnInput -le 20)) {
+                    $numberOfTurns = [int]$trimmedTurnInput; break
+                }
+                Write-Warning "Please enter a valid number between 1 and 20, or press Enter for 20."
+            }
+
+            Write-Host "Starting simulation for $numberOfTurns Gemini messages..." -F Yellow
+            
+            # Display initial user prompt and add to main history
+            Write-Host "`nUser (Initiator):" -F White
+            Write-Host $initialSimPrompt
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "[Simulation Initiator] $initialSimPrompt"}) })
+
+            $simulationApiHistory = [System.Collections.ArrayList]::new() # History for Invoke-GeminiApi context
+            $currentInputForPersona = $initialSimPrompt # This is what the current persona will respond to
+            $activePersonaName = $personaAName
+            $otherPersonaName = $personaBName
+
+            for ($turnCount = 1; $turnCount -le $numberOfTurns; $turnCount++) {
+                Write-Host "`n--- Simulation Message $turnCount/$numberOfTurns ($activePersonaName) ---" -F DarkCyan
+                
+                # Construct the prompt for Gemini to act as the active persona
+                $promptForGemini = "You are acting as '$activePersonaName'. The previous message in the conversation was: '$currentInputForPersona'. Please provide a response in character as '$activePersonaName'."
+                Write-Verbose "[/simulatechat] Prompt for Gemini (as $activePersonaName): $promptForGemini"
+
+                $invokeParams = @{
+                    ApiKey              = $ApiKey
+                    Model               = $sessionConfig.Model
+                    TimeoutSec          = $sessionConfig.TimeoutSec
+                    MaxRetries          = $sessionConfig.MaxRetries
+                    InitialRetryDelaySec = $sessionConfig.InitialRetryDelaySec
+                    Prompt              = $promptForGemini
+                    ConversationHistory = $simulationApiHistory # Pass the API call history
+                }
+                if ($sessionConfig.GenerationConfig) { $invokeParams.GenerationConfig = $sessionConfig.GenerationConfig }
+
+                $apiSimResult = $null
+                Write-Host "$activePersonaName (Thinking...)" -NoNewline -F DarkGray
+                try {
+                    $apiSimResult = Invoke-GeminiApi @invokeParams
+                } catch {
+                    Write-Warning "`rError during simulation API call: $($_.Exception.Message)"
+                    [void]$ConversationHistoryRef.Value.Add(@{role = 'model'; parts = @(@{text = "[Simulation Error] $($_.Exception.Message)"})})
+                    break # Stop simulation on error
+                } finally {
+                     # Robust line clearing
+                     Write-Host "`r" + (' ' * ($Host.UI.RawUI.WindowSize.Width - 1)) + "`r" -NoNewline
+                }
+
+                if ($apiSimResult -and $apiSimResult.Success) {
+                    $personaColor = if($activePersonaName -eq $personaAName){[ConsoleColor]::Cyan}else{[ConsoleColor]::Magenta}
+                    Write-Host "`r$($activePersonaName):" -F $personaColor # Overwrite thinking message
+                    Write-Host $apiSimResult.GeneratedText -F Green
+                    
+                    # Add Gemini's actual response (as the persona) to the main chat history
+                    [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = "[$activePersonaName] $($apiSimResult.GeneratedText)"}) })
+                    
+                    $simulationApiHistory = $apiSimResult.UpdatedConversationHistory # Update API call history
+                    $currentInputForPersona = $apiSimResult.GeneratedText # This becomes input for the next persona
+
+                    if ([string]::IsNullOrWhiteSpace($currentInputForPersona)) { Write-Warning "$activePersonaName returned an empty response. Ending simulation."; break }
+
+                    # Swap personas for the next turn
+                    $tempName = $activePersonaName; $activePersonaName = $otherPersonaName; $otherPersonaName = $tempName;
+                } else {
+                    Write-Host "" # Newline after failed thinking message
+                    $errorDetail = if ($apiSimResult) { "Status: $($apiSimResult.StatusCode), Error: $($apiSimResult.ErrorRecord.Exception.Message), Body: $($apiSimResult.ResponseBody)" } else { "API result was null." }
+                    Write-Warning "Simulation API call for $activePersonaName failed. $errorDetail"
+                    [void]$ConversationHistoryRef.Value.Add(@{role = 'model'; parts = @(@{text = "[Simulation Error - $activePersonaName] API call failed. $errorDetail"})})
+                    break # Stop simulation on error
+                }
+                 if ($turnCount -lt $numberOfTurns) { Start-Sleep -Seconds 1 } # Small delay between turns to be kind to API
+            }
+            Write-Host "`n--- Simulation Ended ---" -ForegroundColor Magenta
+            return $cmdRes
+        }
+        '^/tellajoke$' {
+            $cmdRes.PromptOverride = "Tell me a joke."
+            $cmdRes.CommandExecuted = $true
+            $cmdRes.SkipApiCall = $false # Let the main loop handle the API call
+            Write-Host "Asking Gemini for a joke..." -F DarkGray
+        }
+        '^/rolldice(\s+(\S+))?$' {
+            $diceNotation = if ($Matches[2]) { $Matches[2].Trim() } else { "1d6" }
+            # Basic validation for dice notation (can be expanded)
+            if ($diceNotation -notmatch '^\d+[dD]\d+$' -and $diceNotation -notmatch '^[dD]\d+$') {
+                if ($diceNotation -notmatch '^\d+$') { # allow just a number for dX
+                     Write-Warning "Invalid dice notation '$diceNotation'. Using '1d6'. Expected format like '2d6', 'd20', or '6'."
+                     $diceNotation = "1d6"
+                } else { # if it's just a number, assume d<number>
+                    $diceNotation = "d$diceNotation"
+                }
+            }
+            $cmdRes.PromptOverride = "Narrate the result of rolling $diceNotation dice."
+            $cmdRes.CommandExecuted = $true
+            $cmdRes.SkipApiCall = $false # Let the main loop handle the API call
+            Write-Host "Asking Gemini to roll $diceNotation..." -F DarkGray
+        }
+        '^/cointoss$' {
+            $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $true # Local command
+            $result = if ((Get-Random -Minimum 0 -Maximum 2) -eq 0) { "Heads" } else { "Tails" }
+            $outputText = "Coin toss result: $result"
+            Write-Host "`n$outputText" -F Green
+            # Add to main conversation history
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "/cointoss"}) })
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = $outputText}) })
+        }
          '^/help$' {
             # Display Help Text
             Write-Host "`n--- Available Commands ---" -ForegroundColor Yellow
@@ -621,14 +788,18 @@ function Handle-ChatCommand {
             Write-Host "  /generate_from <path> - Describe image(s) at <path>, then generate new image(s). Prompts if path is missing or uses session media." -ForegroundColor Cyan
             Write-Host "  /model [name] - Change the Gemini model. If no name, shows list." -ForegroundColor Cyan
             Write-Host "  /imagemodel [name] - Change the Vertex AI image generation model. If no name, shows list." -ForegroundColor Cyan
+            Write-Host "  /simulatechat [initial_prompt] - Start a role-playing simulation. Prompts for personas and turns." -ForegroundColor Cyan
+            Write-Host "  /tellajoke    - Ask Gemini to tell a joke." -ForegroundColor Cyan
+            Write-Host "  /rolldice [NdN] - Ask Gemini to narrate a dice roll (e.g., 2d6). Defaults to 1d6." -ForegroundColor Cyan
+            Write-Host "  /cointoss     - Perform a coin toss." -ForegroundColor Cyan
             Write-Host "  /exit         - Exit the chat session." -ForegroundColor Cyan
             Write-Host "  /back         - Cancel current input/selection prompt." -ForegroundColor Cyan
             Write-Host "  /help         - Show this command list." -ForegroundColor Cyan
-            $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $true # Corrected variable name
+            $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $true 
         }
-        default { # Handle unrecognized commands
+        default { 
             Write-Warning "Unrecognized command: '$trimmedInput'. Type '/help' for options or '/exit' to quit."
-            $cmdRes.CommandExecuted = $false; $cmdRes.SkipApiCall = $true # Corrected variable name, treat as no-op, don't call API
+            $cmdRes.CommandExecuted = $false; $cmdRes.SkipApiCall = $true 
         }
     } # End Switch
 
