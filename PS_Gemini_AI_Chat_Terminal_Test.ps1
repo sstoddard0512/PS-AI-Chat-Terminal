@@ -1,4 +1,4 @@
-# Unified Script: Start-GeminiChat - v3.5.5
+# Unified Script: Start-GeminiChat - v4.0.0 (Modular Refactor)
 # Combines features from SimpleMods (v1.23) and Batch (v2.78)
 # - Processes initial media folder files one-by-one (-MediaFolder, -StartPrompt)
 # - Supports metadata modification (-ModifyFiles, -Update*, -Confirm)

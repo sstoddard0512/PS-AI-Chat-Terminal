@@ -1,7 +1,7 @@
 # GeminiApiUtils.ps1
 # Contains functions for interacting with the Google Gemini API.
 
-#Requires -Version 5.1
+#Requires -Version 7
 
 # Depends on CoreUtils.ps1 for Get-MimeTypeFromFile
 
@@ -11,7 +11,7 @@ function Upload-GeminiFile {
     param(
         [Parameter(Mandatory = $true)][string]$ApiKey,
         [Parameter(Mandatory = $true)][System.IO.FileInfo]$FileInfo,
-        [int]$TimeoutSec = 180
+        [int]$TimeoutSec = 600 # Increase upload timeout to match main API timeout
     )
     # ... (Upload-GeminiFile function body from original script v3.5.11 / modular v4.0.0) ...
     # (Ensure it uses Get-MimeTypeFromFile defined in CoreUtils.ps1)
@@ -26,12 +26,11 @@ function Upload-GeminiFile {
     $userAgent = "PowerShell-GeminiApi-Client/FileUploader-4.0.0"
     $totalSize = $FileInfo.Length; $startTime = Get-Date; $progressId = Get-Random
 
-    $progressScriptBlock = { param($FileName, $TotalSize, $ProgressId, $StartTime); while ($true) { $elapsed = (Get-Date) - $StartTime; $status = "Uploading '$FileName' ({0:F2} MB) - Elapsed: {1:hh\:mm\:ss}" -f ($TotalSize / 1MB), $elapsed; Write-Progress -Activity "Uploading via File API" -Status $status -Id $progressId -SecondsRemaining -1; Start-Sleep -Milliseconds 500 } }
+    # Progress bar code removed
     $progressJob = $null
     try {
-        if (Get-Command Start-ThreadJob -EA SilentlyContinue) { $progressJob = Start-ThreadJob -ScriptBlock $progressScriptBlock -ArgumentList $FileInfo.Name, $totalSize, $progressId, $startTime }
-        else { $progressJob = Start-Job -ScriptBlock $progressScriptBlock -ArgumentList $FileInfo.Name, $totalSize, $progressId, $startTime }
-        Write-Verbose "[Upload-GeminiFile] Started progress reporting job (ID: $($progressJob.Id))."
+        # Progress job start removed
+        Write-Verbose "[Upload-GeminiFile] Progress reporting job removed."
         $headers = @{ "X-Goog-Upload-Protocol" = "raw"; "X-Goog-Upload-File-Name" = $FileInfo.Name; "Content-Type" = $mimeType; "User-Agent" = $userAgent }
         Write-Verbose "[Upload-GeminiFile] Sending upload request to $uploadUrl..."
         $response = Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers $headers -InFile $FileInfo.FullName -TimeoutSec $TimeoutSec -ErrorAction Stop
@@ -41,7 +40,7 @@ function Upload-GeminiFile {
         $result.ErrorRecord = $_; Write-Error "[Upload-GeminiFile] Failed to upload file '$($FileInfo.Name)': $($_.Exception.Message)"
         if ($_.Exception.Response) { try { $stream = $_.Exception.Response.GetResponseStream(); $reader = New-Object System.IO.StreamReader($stream); $errorBody = $reader.ReadToEnd(); $reader.Close(); Write-Error "[Upload-GeminiFile] Error Body: $errorBody" } catch { Write-Warning "[Upload-GeminiFile] Could not read error response body." } }
     } finally {
-        if ($progressJob) { Write-Verbose "[Upload-GeminiFile] Stopping progress job..."; Stop-Job $progressJob -EA SilentlyContinue; Remove-Job $progressJob -Force -EA SilentlyContinue; Write-Progress -Activity "Uploading via File API" -Id $progressId -Completed -EA SilentlyContinue; Write-Verbose "[Upload-GeminiFile] Progress job stopped." }
+        # Progress bar cleanup removed
     }
     return [PSCustomObject]$result
 }
@@ -62,7 +61,11 @@ function Invoke-GeminiApi {
         [int]$TimeoutSec = 300,
         [ValidateRange(0, 5)] [int]$MaxRetries = 3,
         [ValidateRange(1, 60)] [int]$InitialRetryDelaySec = 2,
-        [string[]]$InlineFilePaths
+        [string[]]$InlineFilePaths,
+        # Compression parameters passed from session config
+        [bool]$CompressMedia = $false,
+        [string]$FFmpegPath,
+        [string]$CompressionPreset = 'medium'
     )
     # ... (Invoke-GeminiApi function body from original script v3.5.11 / modular v4.0.0) ...
     # (Ensure it uses Upload-GeminiFile defined above and Get-MimeTypeFromFile from CoreUtils.ps1)
@@ -78,12 +81,64 @@ function Invoke-GeminiApi {
         $currentUserParts = [System.Collections.ArrayList]::new(); [void]$currentUserParts.Add(@{ text = $Prompt })
 
         # --- Internal Helper: Find and Add Media Part ---
+        # Updated to include compression logic
         function Add-MediaPart {
-            param([string]$ApiKey, [System.IO.FileInfo]$FileInfo, [long]$MaxSize, [System.Collections.ArrayList]$PartsList)
+            param(
+                [string]$ApiKey,
+                [System.IO.FileInfo]$FileInfo,
+                [long]$MaxSize,
+                [System.Collections.ArrayList]$PartsList,
+                [bool]$CompressMedia,
+                [string]$FFmpegPath,
+                [string]$CompressionPreset
+            )
+
+            $originalFileInfo = $FileInfo # Keep original info
+            $tempCompressedFilePath = $null
+            $isVideo = $false
+
             $mimeType = Get-MimeTypeFromFile -FileInfo $FileInfo # From CoreUtils
             if ([string]::IsNullOrWhiteSpace($mimeType) -or $mimeType -eq 'application/octet-stream') { Write-Warning "[Invoke-GeminiApi] Invalid MIME type for '$($FileInfo.Name)'. Skipping."; return $false }
+            if ($mimeType -like 'video/*') { $isVideo = $true }
+
+            # --- Compression Logic ---
+            if ($CompressMedia -and $FFmpegPath -and $isVideo) {
+                Write-Verbose "[Invoke-GeminiApi] Attempting video compression for '$($FileInfo.Name)' using preset '$CompressionPreset'..."
+                $tempCompressedFileName = "compressed_$($FileInfo.BaseName)_$(Get-Random).mp4" # Use mp4 for output
+                $tempCompressedFilePath = Join-Path -Path $env:TEMP -ChildPath $tempCompressedFileName
+                # Example FFmpeg args - adjust as needed for balance of quality/size/speed
+                # -vf scale=-2:720 scales height to 720p, keeping aspect ratio
+                # -crf 28 is a reasonable quality setting (lower is better quality, larger file)
+                # -preset controls encoding speed vs compression efficiency
+                $ffmpegArgs = "-i `"$($FileInfo.FullName)`" -vf scale=-2:720 -c:v libx264 -crf 28 -preset $CompressionPreset -c:a aac -b:a 128k -movflags +faststart -y `"$tempCompressedFilePath`""
+                Write-Verbose "  FFmpeg command: ffmpeg.exe $ffmpegArgs"
+                try {
+                    $process = Start-Process -FilePath $FFmpegPath -ArgumentList $ffmpegArgs -Wait -NoNewWindow -PassThru -ErrorAction Stop
+                    if ($process.ExitCode -ne 0) { throw "FFmpeg failed with exit code $($process.ExitCode)." }
+                    $compressedFileInfo = Get-Item -LiteralPath $tempCompressedFilePath -ErrorAction Stop
+                    Write-Verbose "  Compression successful. Original size: $(($originalFileInfo.Length / 1MB).ToString('F2')) MB, Compressed size: $(($compressedFileInfo.Length / 1MB).ToString('F2')) MB."
+                    $FileInfo = $compressedFileInfo # Use the compressed file for subsequent steps
+                    # Mime type remains video/mp4 as we output mp4
+                    $mimeType = 'video/mp4'
+                } catch {
+                    Write-Warning "[Invoke-GeminiApi] FFmpeg compression failed for '$($originalFileInfo.Name)': $($_.Exception.Message). Using original file."
+                    if (Test-Path -LiteralPath $tempCompressedFilePath) { Remove-Item -LiteralPath $tempCompressedFilePath -Force -EA SilentlyContinue }
+                    $tempCompressedFilePath = $null # Ensure it's null if compression failed
+                    $FileInfo = $originalFileInfo # Revert to original FileInfo
+                }
+            }
+            # --- End Compression Logic ---
+
             if ($FileInfo.Length -lt $MaxSize) { Write-Verbose "[Invoke-GeminiApi] Encoding inline: '$($FileInfo.Name)'..."; $bytes = [System.IO.File]::ReadAllBytes($FileInfo.FullName); $b64 = [System.Convert]::ToBase64String($bytes); [void]$PartsList.Add(@{ inline_data = @{ mime_type = $mimeType; data = $b64 } }) }
             else { Write-Verbose "[Invoke-GeminiApi] Uploading large file: '$($FileInfo.Name)'..."; $uploadResult = Upload-GeminiFile -ApiKey $ApiKey -FileInfo $FileInfo; if ($uploadResult?.Success) { [void]$PartsList.Add(@{ file_data = @{ mime_type = $mimeType; file_uri = $uploadResult.FileUri } }) } else { throw "Failed to upload large file '$($FileInfo.Name)'. Error: $($uploadResult.ErrorRecord.Exception.Message)" } }
+
+            # --- Cleanup Temporary Compressed File ---
+            if ($tempCompressedFilePath -and (Test-Path -LiteralPath $tempCompressedFilePath)) {
+                Write-Verbose "  Cleaning up temporary compressed file: $tempCompressedFilePath"
+                Remove-Item -LiteralPath $tempCompressedFilePath -Force -ErrorAction SilentlyContinue
+            }
+            # --- End Cleanup ---
+
             return $true
         }
         # --- End Internal Helper ---
@@ -91,21 +146,34 @@ function Invoke-GeminiApi {
         try {
             $allMediaFiles = [System.Collections.ArrayList]::new()
             if ($PSBoundParameters.ContainsKey('InlineFilePaths') -and $InlineFilePaths) {
-                Write-Verbose "[Invoke-GeminiApi] Processing -InlineFilePaths."
-                foreach ($filePath in $InlineFilePaths) { if (Test-Path -LiteralPath $filePath -PathType Leaf) { [void]$allMediaFiles.Add((Get-Item -LiteralPath $filePath -EA Stop)) } else { Write-Warning "[Invoke-GeminiApi] File not found: '$filePath'." } }
+                Write-Verbose "[Invoke-GeminiApi] Processing $($InlineFilePaths.Count) file(s) from -InlineFilePaths."
+                foreach ($filePath in $InlineFilePaths) {
+                    if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) { Write-Warning "[Invoke-GeminiApi] File not found: '$filePath'. Skipping."; continue }
+                    [void]$allMediaFiles.Add((Get-Item -LiteralPath $filePath -EA Stop))
+                }
             }
             elseif ($PSBoundParameters.ContainsKey('ImageFolder') -or $PSBoundParameters.ContainsKey('VideoFolder')) {
-                 Write-Verbose "[Invoke-GeminiApi] Processing -ImageFolder/-VideoFolder..."
-                 function Get-MediaFilesInternal { param([string]$Path, [switch]$Recurse, [string[]]$Ext) try { $p=@{Path=$Path;File=$true;EA='Stop'}; if($Recurse){$p.Recurse=$true}; (Get-ChildItem @p|Where{$Ext -contains $_.Extension.ToLowerInvariant()})}catch{Write-Error "Failed search '$Path': $($_.Exception.Message)";return $null}}
+                 Write-Verbose "[Invoke-GeminiApi] Processing media from -ImageFolder/-VideoFolder..."
+                 # Use Get-StartMediaFiles (defined outside)
                  $imgExt = @('.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif', '.bmp', '.tif', '.tiff')
                  $vidExt = @('.mp4', '.mpeg', '.mov', '.avi', '.flv', '.mpg', '.webm', '.wmv', '.3gp', '.3gpp', '.mkv')
-                 if ($PSBoundParameters.ContainsKey('ImageFolder')) { $imgFiles = Get-MediaFilesInternal -Path $ImageFolder -Recurse:$Recurse.IsPresent -Ext $imgExt; if ($imgFiles) { $imgFiles | ForEach-Object { [void]$allMediaFiles.Add($_) } } }
-                 if ($PSBoundParameters.ContainsKey('VideoFolder') -and $VideoFolder -ne $ImageFolder) { $vidFiles = Get-MediaFilesInternal -Path $VideoFolder -Recurse:$Recurse.IsPresent -Ext $vidExt; if ($vidFiles) { $vidFiles | ForEach-Object { [void]$allMediaFiles.Add($_) } } }
+                 if ($PSBoundParameters.ContainsKey('ImageFolder')) { $imgFiles = Get-StartMediaFiles -FolderPath $ImageFolder -Recurse:$Recurse.IsPresent -SupportedExtensions $imgExt -MediaType 'image'; if ($imgFiles) { $imgFiles | ForEach-Object { [void]$allMediaFiles.Add($_) } } }
+                 if ($PSBoundParameters.ContainsKey('VideoFolder') -and $VideoFolder -ne $ImageFolder) { $vidFiles = Get-StartMediaFiles -FolderPath $VideoFolder -Recurse:$Recurse.IsPresent -SupportedExtensions $vidExt -MediaType 'video'; if ($vidFiles) { $vidFiles | ForEach-Object { [void]$allMediaFiles.Add($_) } } }
                  Write-Verbose "[Invoke-GeminiApi] Found $($allMediaFiles.Count) media file(s) in folders."
             }
-            else { Write-Verbose "[Invoke-GeminiApi] No media files provided." }
+            else { Write-Verbose "[Invoke-GeminiApi] No media files provided for this call." }
 
-            foreach ($fileInfo in $allMediaFiles) { $addSuccess = Add-MediaPart -ApiKey $ApiKey -FileInfo $fileInfo -MaxSize $maxInlineDataSizeBytes -PartsList $currentUserParts; if (-not $addSuccess) { /* Optional: Handle specific skipping */ } }
+            foreach ($fileInfo in $allMediaFiles) {
+                $addSuccess = Add-MediaPart `
+                    -ApiKey $ApiKey `
+                    -FileInfo $fileInfo `
+                    -MaxSize $maxInlineDataSizeBytes `
+                    -PartsList $currentUserParts `
+                    -CompressMedia $CompressMedia `
+                    -FFmpegPath $FFmpegPath `
+                    -CompressionPreset $CompressionPreset
+                if (-not $addSuccess) { /* Optional: Handle specific skipping */ }
+            }
         } catch { Write-Error "[Invoke-GeminiApi] Failed processing media: $($_.Exception.Message)"; $result.ErrorRecord = $_; $result.Success = $false; return $result }
 
         $currentHistoryPayload = [System.Collections.ArrayList]::new($ConversationHistory) # Copy history
@@ -121,9 +189,43 @@ function Invoke-GeminiApi {
                 Write-Verbose "[Invoke-GeminiApi] Request successful."; break
             }
             catch [System.Net.WebException] {
-                $webEx = $_; $statusCode = if ($webEx.Exception.Response) { [int]$webEx.Exception.Response.StatusCode } else { $null }; $result.ErrorRecord = $webEx; $result.StatusCode = $statusCode
-                try { if ($webEx.Exception.Response) { $stream=$webEx.Exception.Response.GetResponseStream();$reader=New-Object IO.StreamReader($stream);$result.ResponseBody=$reader.ReadToEnd();$reader.Close(); if($statusCode -eq 400){Write-Error "[Invoke-GeminiApi] 400 Body: $($result.ResponseBody)"}Write-Verbose "[Invoke-GeminiApi] Error Body: $($result.ResponseBody)"}}catch{Write-Warning "No error body."}
-                $errorMsg = "[Invoke-GeminiApi] Web exception (Status: $statusCode)."; if($statusCode -eq 400){$errorMsg+=" Check request."}; if($statusCode -eq 429 -and $currentRetry -lt $MaxRetries){$currentRetry++;$delay=($InitialRetryDelaySec*([Math]::Pow(2,$currentRetry-1)))+(Get-Random -Mi 0 -Ma 1000)/1000.0;Write-Warning "[Invoke-GeminiApi] 429. Retrying $currentRetry/$($MaxRetries+1) in $($delay.ToString('F2'))s...";Start-Sleep -Sec $delay;continue}else{Write-Error $errorMsg;break}
+                $webEx = $_
+                $statusCode = if ($webEx.Exception.Response) { [int]$webEx.Exception.Response.StatusCode } else { $null }
+                $result.ErrorRecord = $webEx
+                $result.StatusCode = $statusCode
+                $specificLocationError = $false
+
+                try {
+                    if ($webEx.Exception.Response) {
+                        $stream = $webEx.Exception.Response.GetResponseStream()
+                        $reader = New-Object System.IO.StreamReader($stream)
+                        $result.ResponseBody = $reader.ReadToEnd()
+                        $reader.Close()
+                        Write-Verbose "[Invoke-GeminiApi] Error Body: $($result.ResponseBody)" # Log full error body if verbose
+
+                        if ($statusCode -eq 400) {
+                            try {
+                                $errorObject = $result.ResponseBody | ConvertFrom-Json -ErrorAction SilentlyContinue
+                                if ($errorObject.error.message -match "User location is not supported") {
+                                    $specificLocationError = $true
+                                }
+                            } catch { Write-Verbose "[Invoke-GeminiApi] Could not parse 400 error body as JSON or find specific location message." }
+                        }
+                    }
+                } catch { Write-Warning "[Invoke-GeminiApi] Could not fully process error response body: $($_.Exception.Message)" }
+
+                $errorMsg = "[Invoke-GeminiApi] Web exception (Status: $statusCode)." # Default message
+                if ($specificLocationError) {
+                    $errorMsg = "[Invoke-GeminiApi] API Error (400 - FAILED_PRECONDITION): User location is not supported for API use. Please check your Google Cloud project settings, API key restrictions, and Gemini API regional availability. Full error body logged if -Verbose is used."
+                } elseif ($statusCode -eq 400) {
+                    $errorMsg = "[Invoke-GeminiApi] API Error (400 - Bad Request). Check request details. Full error body logged if -Verbose is used."
+                }
+
+                if ($statusCode -eq 429 -and $currentRetry -lt $MaxRetries) {
+                    $currentRetry++; $delay = ($InitialRetryDelaySec * ([Math]::Pow(2, $currentRetry - 1))) + (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
+                    Write-Warning "[Invoke-GeminiApi] Rate limit (429). Retrying $currentRetry/$($MaxRetries + 1) in $($delay.ToString('F2'))s..."
+                    Start-Sleep -Seconds $delay; continue
+                } else { Write-Error $errorMsg; break }
             }
             catch { $errMsg = "[Invoke-GeminiApi] Error: $($_.Exception.Message)"; Write-Error $errMsg; $result.ErrorRecord = $_; $result.ResponseBody = $errMsg; break }
         }

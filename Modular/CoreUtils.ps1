@@ -1,7 +1,7 @@
 # CoreUtils.ps1
 # Contains general utility functions, session initialization, and CSV saving logic.
 
-#Requires -Version 5.1
+#Requires -Version 7
 
 # --- Helper Function: Get MIME Type ---
 function Get-MimeTypeFromFile {
@@ -63,13 +63,49 @@ function Initialize-GeminiChatSession {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)]$BoundParameters,
-        [Parameter(Mandatory=$true)]$Invocation
+        [Parameter(Mandatory=$true)]$Invocation,
+        [Parameter(Mandatory=$true)][bool]$IsVerbose # New parameter
     )
 
     Write-Verbose "[Initialize-GeminiChatSession] Initializing session..."
 
     # Parameters from Start-GeminiChat are directly accessible in this scope,
     # including their default values if not explicitly provided by the user.
+    # Extract parameters (makes access easier)
+    $ApiKey = $BoundParameters['ApiKey']
+    $Model = $BoundParameters['Model']
+    $GenerationConfig = $BoundParameters['GenerationConfig']
+    $TimeoutSec = $BoundParameters['TimeoutSec']
+    $MaxRetries = $BoundParameters['MaxRetries']
+    $InitialRetryDelaySec = $BoundParameters['InitialRetryDelaySec']
+    $FileDelaySec = $BoundParameters['FileDelaySec']
+    $StartPrompt = $BoundParameters['StartPrompt']
+    $MediaFolder = $BoundParameters['MediaFolder']
+    $RecurseFiles = $BoundParameters['RecurseFiles']
+    $ModifyFiles = $BoundParameters['ModifyFiles']
+    $Confirm = $BoundParameters['Confirm']
+    $UpdateTitle = $BoundParameters['UpdateTitle']
+    $UpdateAuthor = $BoundParameters['UpdateAuthor']
+    $AuthorName = $BoundParameters['AuthorName']
+    $UpdateSubject = $BoundParameters['UpdateSubject']
+    $UpdateTags = $BoundParameters['UpdateTags']
+    $UpdateRating = $BoundParameters['UpdateRating']
+    $UpdateLocation = $BoundParameters['UpdateLocation']
+    $UpdateDescription = $BoundParameters['UpdateDescription']
+    $ExifToolPath = $BoundParameters['ExifToolPath']
+    $OutputFile = $BoundParameters['OutputFile']
+    $LogFile = $BoundParameters['LogFile'] # <-- GET NEW PARAMETER
+    $VertexProjectId = $BoundParameters['VertexProjectId']
+    $VertexLocationId = $BoundParameters['VertexLocationId']
+    $VertexDefaultOutputFolder = $BoundParameters['VertexDefaultOutputFolder']
+    $VertexImageModel = $BoundParameters['VertexImageModel']
+    $CsvOutputFile = $BoundParameters['CsvOutputFile']
+    $ResultsCsvFile = $BoundParameters['ResultsCsvFile']
+    $Media = $BoundParameters['Media'] # Renamed from InitialMedia
+    $CompressMediaSwitchParam = $BoundParameters['CompressMedia'] # Will be a SwitchParameter object if present, otherwise $null
+    $FFmpegPathFromUser = $BoundParameters['FFmpegPath']       # Path provided by user, or $null
+    $CompressionPreset = $BoundParameters['CompressionPreset'] # Preset from user, or $null
+
 
     # Parameter Validation
     if ($MediaFolder -and [string]::IsNullOrWhiteSpace($StartPrompt)) { throw "-StartPrompt is required when -MediaFolder is specified." }
@@ -82,7 +118,7 @@ function Initialize-GeminiChatSession {
     if ($Confirm -and -not $ModifyFiles) { Write-Warning "-Confirm ignored without -ModifyFiles." }
 
     # File/Directory Path Validation and Creation
-    $pathsToValidate = @{ CsvOutputFile = $CsvOutputFile; ResultsCsvFile = $ResultsCsvFile; OutputFile = $OutputFile }
+    $pathsToValidate = @{ CsvOutputFile = $CsvOutputFile; ResultsCsvFile = $ResultsCsvFile; OutputFile = $OutputFile; LogFile = $LogFile } # <-- ADD LogFile
     foreach ($item in $pathsToValidate.GetEnumerator()) {
         $paramName = $item.Name; $filePath = $item.Value
         if ($BoundParameters.ContainsKey($paramName) -and -not ([string]::IsNullOrWhiteSpace($filePath))) {
@@ -108,8 +144,28 @@ function Initialize-GeminiChatSession {
             else { Write-Warning "-ExifToolPath '$ExifToolPath' not found. Searching PATH." }
         }
         if (-not $resolvedExifToolPath) { $exifToolCmd = Get-Command exiftool.exe -EA SilentlyContinue; if ($exifToolCmd) { $resolvedExifToolPath = $exifToolCmd.Path } }
-        if (-not $resolvedExifToolPath) { Write-Error "ExifTool not found. Required for -ModifyFiles or -UpdateLocation."; $ModifyFiles = $false; $UpdateLocation = $false; Write-Warning "Disabling -ModifyFiles and -UpdateLocation." }
+        if (-not $resolvedExifToolPath) { Write-Error "ExifTool not found via -ExifToolPath or in PATH. Required for -ModifyFiles or -UpdateLocation. Download from https://exiftool.org/."; $ModifyFiles = $false; $UpdateLocation = $false; Write-Warning "Disabling -ModifyFiles and -UpdateLocation." }
         else { Write-Verbose "Using ExifTool at: $resolvedExifToolPath" }
+    }
+
+    # --- Check for FFmpeg if compression is enabled ---
+    $resolvedFFmpegPath = $null
+    $shouldCompressMedia = if ($CompressMediaSwitchParam -ne $null) { $CompressMediaSwitchParam.IsPresent } else { $false }
+
+    if ($shouldCompressMedia) {
+        if ($FFmpegPathFromUser) {
+            if ((Test-Path -LiteralPath $FFmpegPathFromUser -PathType Leaf) -and ($FFmpegPathFromUser -like '*ffmpeg.exe')) { $resolvedFFmpegPath = $FFmpegPathFromUser }
+            elseif (Test-Path -LiteralPath $FFmpegPathFromUser -PathType Container) { $potentialPath = Join-Path -Path $FFmpegPathFromUser -ChildPath 'ffmpeg.exe'; if (Test-Path -LiteralPath $potentialPath -PathType Leaf) { $resolvedFFmpegPath = $potentialPath } else { Write-Warning "-FFmpegPath folder '$FFmpegPathFromUser' does not contain 'ffmpeg.exe'. Searching PATH." } }
+            else { Write-Warning "-FFmpegPath '$FFmpegPathFromUser' not found. Searching PATH." }
+        }
+        if (-not $resolvedFFmpegPath) { $ffmpegCmd = Get-Command ffmpeg.exe -EA SilentlyContinue; if ($ffmpegCmd) { $resolvedFFmpegPath = $ffmpegCmd.Path } }
+        if (-not $resolvedFFmpegPath) {
+            Write-Error "FFmpeg not found via -FFmpegPath or in PATH. Required for -CompressMedia. Download from https://ffmpeg.org/."
+            $shouldCompressMedia = $false # Disable compression if FFmpeg is not found
+            Write-Warning "Disabling -CompressMedia due to missing FFmpeg."
+        } else { Write-Verbose "Using FFmpeg at: $resolvedFFmpegPath" }
+    } else {
+        Write-Verbose "Media compression disabled."
     }
 
     # Final API Key Check
@@ -118,14 +174,18 @@ function Initialize-GeminiChatSession {
     # Create Session Configuration Hashtable
     # Use the parameter variables directly - they hold the correct value (passed or default)
     $sessionConfig = @{
-        Model=$Model; TimeoutSec=$TimeoutSec; MaxRetries=$MaxRetries; InitialRetryDelaySec=$InitialRetryDelaySec; FileDelaySec=$FileDelaySec;
+        Model=$Model; TimeoutSec=$TimeoutSec; MaxRetries=$MaxRetries;
+        # Explicitly handle default for InitialRetryDelaySec if not bound
+        InitialRetryDelaySec = if ($BoundParameters.ContainsKey('InitialRetryDelaySec')) { $InitialRetryDelaySec } else { 2 };
+        FileDelaySec=$FileDelaySec;
         MediaFolder=$MediaFolder; RecurseFiles=$RecurseFiles; ModifyFiles=$ModifyFiles; ConfirmModifications=$Confirm;
         UpdateTitle=$UpdateTitle; UpdateAuthor=$UpdateAuthor; AuthorName=$AuthorName; UpdateSubject=$UpdateSubject; UpdateTags=$UpdateTags;
         UpdateRating=$UpdateRating; UpdateLocation=$UpdateLocation; UpdateDescription=$UpdateDescription; ExifToolPath=$resolvedExifToolPath;
         OutputFile=$OutputFile; CsvOutputFile=$CsvOutputFile; ResultsCsvFile=$ResultsCsvFile;
-        # Note: Switches like $RecurseFiles are [switch] type, accessing $RecurseFiles.IsPresent might be safer if needed elsewhere, but direct use here is okay for hashtable.
-        VertexProjectId=$VertexProjectId; VertexLocationId=$VertexLocationId; VertexDefaultOutputFolder=$VertexDefaultOutputFolder; VertexImageModel=$VertexImageModel;
-        GenerationConfig=$GenerationConfig; Verbose=($VerbosePreference -eq 'Continue')
+        LogFile=$LogFile; # <-- ADD LogFile
+        Media=$Media; VertexProjectId=$VertexProjectId; VertexLocationId=$VertexLocationId; VertexDefaultOutputFolder=$VertexDefaultOutputFolder; VertexImageModel=$VertexImageModel; # Renamed from InitialMedia
+        GenerationConfig=$GenerationConfig; Verbose=$IsVerbose; # Use the passed boolean directly
+        CompressMedia=$shouldCompressMedia; FFmpegPath=$resolvedFFmpegPath; CompressionPreset=$CompressionPreset # Add compression settings
     }
 
     # Initial Messages
@@ -145,11 +205,13 @@ function Initialize-GeminiChatSession {
     if ($activeFlagsList.Count -gt 0) { Write-Host "Active Flags: $($activeFlagsList -join ', ')" -ForegroundColor Cyan } else { Write-Host "Active Flags: None" -ForegroundColor Cyan }
     if ($sessionConfig.ModifyFiles) { Write-Host "Modifications Enabled. $($sessionConfig.ConfirmModifications ? 'Confirmation required.' : 'Automatic changes.')" -ForegroundColor Yellow }
     if ($sessionConfig.UpdateLocation) { Write-Host "Location Processing Enabled." -ForegroundColor Yellow }
+    if ($sessionConfig.CompressMedia) { Write-Host "Video Compression Enabled (Preset: $($sessionConfig.CompressionPreset)). Requires FFmpeg." -ForegroundColor Yellow }
     if ($sessionConfig.MediaFolder -and $sessionConfig.FileDelaySec -gt 0) { Write-Host "File Delay: $($sessionConfig.FileDelaySec)s." -ForegroundColor Cyan }
     if ($sessionConfig.VertexProjectId -and $sessionConfig.VertexLocationId -and $sessionConfig.VertexDefaultOutputFolder) { Write-Host "Vertex AI Configured." -ForegroundColor Cyan } else { Write-Warning "Vertex AI parameters not fully specified. Commands will prompt if used." }
     if ($sessionConfig.ResultsCsvFile) { Write-Host "Saving parsed results to: $($sessionConfig.ResultsCsvFile)" -ForegroundColor Cyan }
     if ($sessionConfig.CsvOutputFile) { Write-Host "Saving history to: $($sessionConfig.CsvOutputFile)" -ForegroundColor Cyan }
-    if ($sessionConfig.OutputFile) { Write-Host "Appending chat log to: $($sessionConfig.OutputFile)" -ForegroundColor Cyan }
+    if ($sessionConfig.OutputFile) { Write-Host "Appending media processing log to: $($sessionConfig.OutputFile)" -ForegroundColor Cyan }
+    if ($sessionConfig.LogFile) { Write-Host "Appending interactive log to: $($sessionConfig.LogFile)" -ForegroundColor Cyan } # <-- ADD LogFile message
     Write-Host "------------------------------------------" -ForegroundColor Cyan
 
     return $sessionConfig

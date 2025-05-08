@@ -1,0 +1,31 @@
+
+
+
+
+--- Turn 1 (05/06/2025 11:04:56) - API ERROR ---
+You:
+hi
+
+ERROR:
+Status: Err:Response status code does not indicate success: 400 (Bad Request). Body:[Invoke-GeminiApi] Error: Response status code does not indicate success: 400 (Bad Request).
+---
+
+
+--- Turn 1 (05/06/2025 11:06:28) ---
+You:
+hi
+
+Gemini:
+Hi there! How can I help you today?
+
+
+
+--- Turn 2 (05/06/2025 11:06:35) ---
+You:
+hi
+
+Gemini:
+Hi!  What's up?
+
+
+

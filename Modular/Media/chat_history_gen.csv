@@ -1,0 +1,11 @@
+"Turn","Role","Text"
+"1","USER","$response"
+"1","MODEL","Please provide me with the context or value of `$response`.  I need that information to understand what you want me to do with it.  `$response` is a variable, and I don't know what's stored in it.
+"
+
+
+
+
+
+
+

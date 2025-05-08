@@ -2,7 +2,7 @@
 # Contains functions for processing initial media files, interacting with ExifTool,
 # parsing Gemini responses for file metadata, and saving parsed results.
 
-#Requires -Version 5.1
+#Requires -Version 7
 # Requires ExifTool for modification/location features.
 
 # Depends on CoreUtils.ps1 for Sanitize-Filename
@@ -156,7 +156,26 @@ function Update-FileWithGeminiResults {
         $isConflict=$isRename -and (Test-Path -LiteralPath $newPath -PathType Leaf)
         Write-Host "`n--- Proposed Changes for '$($FileInfo.Name)' ---" -F Yellow;$rnmMsg=if(-not $isRename){"Metadata only"}else{"'$($FileInfo.Name)' -> '$newName'"};$metaMsgs=@();if($SessionConfig.UpdateTitle -and $ParsedData.Name){$metaMsgs+="Title"};if($SessionConfig.UpdateAuthor){$metaMsgs+="Author"};if($SessionConfig.UpdateSubject -and $ParsedData.Name){$metaMsgs+="Subject"};if($SessionConfig.UpdateTags){$metaMsgs+=if($ParsedData.Tags.Count -gt 0){"Tags($($ParsedData.Tags.Count))"}else{"ClearTags"}};if($SessionConfig.UpdateRating -and $ParsedData.Rating -ne $null){$metaMsgs+="Rating"};if($SessionConfig.UpdateLocation -and $ParsedData.Location){$metaMsgs+="LocMeta"};if($SessionConfig.UpdateDescription -and $ParsedData.Description){$metaMsgs+="Desc"};$metaMsg=if($metaMsgs){" ($($metaMsgs -join ', '))"}else{""}
         if($isConflict){Write-Host "[CONFLICT] $rnmMsg" -F Red}else{Write-Host "$rnmMsg$metaMsg" -F Cyan};Write-Host "---" -F Yellow
-        if($isConflict){Write-Warning "Skipped (conflict).";$skippedCount++}elseif($SessionConfig.ConfirmModifications){if((Read-Host "Proceed?(y/N)")-eq 'y'){$proceed=$true}else{Write-Host Aborted -F Yellow;$skippedCount++}}else{Write-Host Proceeding -F Yellow;$proceed=$true}
+        if($isConflict){Write-Warning "Skipped (conflict).";$skippedCount++}
+        elseif($SessionConfig.ConfirmModifications){
+            $confirmInput = ''
+            while ($true) {
+                $confirmInput = Read-Host "Proceed? (Y/n, or /back to cancel)" # Changed prompt
+                $trimmedLowerConfirm = $confirmInput.Trim().ToLowerInvariant()
+                if ($trimmedLowerConfirm -eq '/back') { # Allow /back here as well for consistency, though it acts like 'n'
+                    Write-Host "(Confirmation cancelled / No)" -F Gray
+                    $proceed = $false
+                    break
+                }
+                if ([string]::IsNullOrWhiteSpace($trimmedLowerConfirm) -or $trimmedLowerConfirm -eq 'y' -or $trimmedLowerConfirm -eq 'n') {
+                    $proceed = ([string]::IsNullOrWhiteSpace($trimmedLowerConfirm) -or $trimmedLowerConfirm -eq 'y')
+                    break
+                }
+                Write-Warning "Invalid input. Please enter 'y', 'n', or /back."
+            }
+            if (-not $proceed) { Write-Host Aborted -F Yellow; $skippedCount++ }
+        }
+        else{Write-Host Proceeding -F Yellow;$proceed=$true} # No confirmation needed
     } else { Write-Verbose " No changes proposed." }
     if ($proceed) {
         $curPath=$FileInfo.FullName;$renameOK=$true;$metaOK=$true
