@@ -29,6 +29,8 @@ function Get-ChatInput {
         Write-Host "  /generate ... - Generate an image via Vertex AI. Prompts if prompt is missing." -ForegroundColor Cyan
         Write-Host "  /generate_from <path> - Describe image(s) at <path>, then generate new image(s). Prompts if path is missing or uses session media." -ForegroundColor Cyan
         Write-Host "  /model [name] - Change the Gemini model. If no name, shows list." -ForegroundColor Cyan
+        Write-Host "  /adventuregame [theme] - Start an interactive choose-your-own-adventure game." -ForegroundColor Cyan
+        Write-Host "  /escaperoom [theme] - Start an interactive escape room game." -ForegroundColor Cyan
         Write-Host "  /imagemodel [name] - Change the Vertex AI image generation model. If no name, shows list." -ForegroundColor Cyan
         Write-Host "  /simulatechat [initial_prompt] - Start a role-playing simulation. Prompts for personas and turns." -ForegroundColor Cyan
         Write-Host "  /tellajoke    - Ask Gemini to tell a joke." -ForegroundColor Cyan
@@ -775,6 +777,255 @@ function Handle-ChatCommand {
             [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "/cointoss"}) })
             [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = $outputText}) })
         }
+        '^/escaperoom(\s+(.+))?$' {
+            $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $true
+            Write-Host "`n--- Starting Escape Room Game ---" -ForegroundColor Magenta
+
+            $escapeRoomTheme = "a mysterious locked library" # Default theme
+            if ($Matches[2]) {
+                $escapeRoomTheme = $Matches[2].Trim()
+            } else {
+                Write-Host "No theme specified for the escape room. Asking Gemini for some ideas..." -F DarkGray
+                $themeSuggestionPrompt = "Suggest 3-5 diverse and interesting themes for a text-based escape room game. Present them as a numbered list. For example: '1. A high-tech laboratory with a rogue AI.' or '2. An ancient pharaoh's tomb filled with traps.'"
+                $themeInvokeParams = @{
+                    ApiKey              = $ApiKey; Model = $sessionConfig.Model; TimeoutSec = $sessionConfig.TimeoutSec
+                    MaxRetries          = $sessionConfig.MaxRetries; InitialRetryDelaySec = $sessionConfig.InitialRetryDelaySec
+                    Prompt              = $themeSuggestionPrompt; ConversationHistory = @()
+                }
+                if ($sessionConfig.GenerationConfig) { $themeInvokeParams.GenerationConfig = $sessionConfig.GenerationConfig }
+
+                $apiThemeResult = $null
+                try { $apiThemeResult = Invoke-GeminiApi @themeInvokeParams } catch { Write-Warning "Error getting escape room theme suggestions: $($_.Exception.Message)" }
+
+                $suggestedThemes = [System.Collections.ArrayList]::new()
+                if ($apiThemeResult -and $apiThemeResult.Success -and -not [string]::IsNullOrWhiteSpace($apiThemeResult.GeneratedText)) {
+                    Write-Host "Gemini suggests these escape room themes:" -F Green; Write-Host $apiThemeResult.GeneratedText -F Green
+                    $apiThemeResult.GeneratedText -split '\r?\n' | ForEach-Object { if ($_ -match '^\s*\d+\.\s*(.+)') { [void]$suggestedThemes.Add($Matches[1].Trim()) } }
+                } else { Write-Warning "Could not get theme suggestions. You can enter your own or use the default." }
+
+                $promptMessage = "Enter a theme (e.g., 'abandoned spaceship'), choose a number from suggestions, press Enter for default '$escapeRoomTheme', or /back to cancel"
+                $customThemeInput = Read-Host $promptMessage
+
+                if ($customThemeInput.Trim().ToLowerInvariant() -eq '/back') { Write-Host "(Escape room game cancelled)" -F Gray; return $cmdRes }
+
+                if ($customThemeInput -match '^\d+$' -and [int]$customThemeInput -ge 1 -and [int]$customThemeInput -le $suggestedThemes.Count) {
+                    $escapeRoomTheme = $suggestedThemes[[int]$customThemeInput - 1]
+                    Write-Host "Selected theme: '$escapeRoomTheme'" -F Yellow
+                } elseif (-not [string]::IsNullOrWhiteSpace($customThemeInput)) { $escapeRoomTheme = $customThemeInput.Trim() }
+            }
+            Write-Host "Escape Room Theme: '$escapeRoomTheme'. Type '/exit' during your turn to end the game." -F Yellow
+
+            $systemPrompt = @"
+You are an Escape Room Game Master.
+The player has chosen the theme: '$escapeRoomTheme'.
+
+Your role is to guide the player through an interactive escape room scenario. The player needs to solve puzzles, find clues, and use items to escape the room. The game must be winnable.
+
+**Your Turn Structure:**
+1.  **Describe the Room/Area:** Vividly describe the current part of the room, any notable objects, puzzles, or interactive elements. If the player has items, remind them implicitly or if relevant to the current puzzle.
+2.  **Present Choices:** Offer 2 to 4 clearly numbered choices for actions the player can take (e.g., "1. Examine the dusty bookshelf.", "2. Try the silver key on the locked drawer.", "3. Look under the rug."). Choices should be logical actions within an escape room.
+3.  **Acknowledge Previous Choice (Optional but good):** Briefly acknowledge the player's last action and its immediate result if it makes sense narratively.
+
+**Game Endings:**
+*   **WIN (ESCAPED):** If the player successfully solves all necessary puzzles and finds the way out, clearly state "CONGRATULATIONS, YOU ESCAPED!" and provide a brief, satisfying concluding narrative of their escape.
+*   **GAME OVER (FAILED):** If the player makes a critical mistake that makes escape impossible, or if an implicit timer (managed by you narratively) runs out, clearly state "GAME OVER. You failed to escape." and briefly explain why.
+
+**Important Rules:**
+*   **Winnable Path:** Always ensure there is a logical sequence of actions and puzzle solutions that leads to escape.
+*   **Puzzles & Clues:** Puzzles should be solvable with information and items found within the room. Clues should be discoverable.
+*   **Implicit Inventory:** You, the Game Master, will keep track of items the player has found or important states of objects. The player doesn't need to manage an explicit inventory list unless you decide to present it as part of the narrative.
+*   **Stay In Character:** Do not break character.
+*   **Clarity:** Make choices and their potential immediate implications clear.
+*   **Progression:** The game must progress. Avoid dead ends unless they are red herrings that can be identified.
+*   **No External Knowledge:** Base the game only on the theme and player choices. Do not ask for external input beyond their choice number.
+*   **Response Format:** Respond ONLY with the game narrative and the numbered choices. Do not include conversational pleasantries like "What would you like to do?".
+
+Let's begin the escape room! Based on the theme '$escapeRoomTheme', present the initial view of the room and the first set of choices.
+"@
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "/escaperoom theme: $escapeRoomTheme"}) })
+
+            $escapeRoomApiHistory = [System.Collections.ArrayList]::new()
+            $currentEscapeRoomPrompt = $systemPrompt
+            $gameEnded = $false
+
+            while (-not $gameEnded) {
+                $invokeParams = @{
+                    ApiKey = $ApiKey; Model = $sessionConfig.Model; TimeoutSec = $sessionConfig.TimeoutSec
+                    MaxRetries = $sessionConfig.MaxRetries; InitialRetryDelaySec = $sessionConfig.InitialRetryDelaySec
+                    Prompt = $currentEscapeRoomPrompt; ConversationHistory = $escapeRoomApiHistory
+                }
+                if ($sessionConfig.GenerationConfig) { $invokeParams.GenerationConfig = $sessionConfig.GenerationConfig }
+
+                Write-Host "`nGame Master (Thinking...)" -NoNewline -F DarkGray; $apiGameResult = $null
+                try { $apiGameResult = Invoke-GeminiApi @invokeParams }
+                catch { Write-Warning "`rError during escape room API call: $($_.Exception.Message)";[void]$ConversationHistoryRef.Value.Add(@{role = 'model'; parts = @(@{text = "[Escape Room Error] $($_.Exception.Message)"})});$gameEnded = $true;continue }
+                finally { Write-Host "`r" + (' ' * ($Host.UI.RawUI.WindowSize.Width - 1)) + "`r" -NoNewline }
+
+                if ($apiGameResult -and $apiGameResult.Success) {
+                    $gameMasterResponse = $apiGameResult.GeneratedText
+                    Write-Host "`rGame Master:" -F Green; Write-Host $gameMasterResponse -F Green
+                    [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = "[Escape Room] $gameMasterResponse"}) })
+                    $escapeRoomApiHistory = $apiGameResult.UpdatedConversationHistory
+
+                    if ($gameMasterResponse -match "GAME OVER." -or $gameMasterResponse -match "CONGRATULATIONS, YOU ESCAPED!") { Write-Host "--- Escape Room Game Ended ---" -F Magenta;$gameEnded = $true;continue }
+
+                    $playerChoiceInput = $null
+                    while ($true) {
+                        $playerChoiceInput = Read-Host "`nYour Action (enter number, or /exit to end game, or /back to re-enter choice)"
+                        if ($playerChoiceInput.Trim().ToLowerInvariant() -eq '/exit') { Write-Host "Exiting escape room." -F Yellow;[void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "[Escape Room] /exit"}) });$gameEnded = $true;break }
+                        if ($playerChoiceInput.Trim().ToLowerInvariant() -eq '/back') { Write-Host "(Re-enter action)" -F Gray; continue }
+                        if ($playerChoiceInput -match '^\d+$' -or -not [string]::IsNullOrWhiteSpace($playerChoiceInput)) { break }
+                        Write-Warning "Please enter an action number, /exit, or /back."
+                    }
+                    if ($gameEnded) { continue }
+                    $currentEscapeRoomPrompt = "My action is: $($playerChoiceInput.Trim())"
+                    [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "[Escape Room] Action: $($playerChoiceInput.Trim())"}) })
+                } else {
+                    $errorDetail = if ($apiGameResult) { "Status: $($apiGameResult.StatusCode), Error: $($apiGameResult.ErrorRecord.Exception.Message), Body: $($apiGameResult.ResponseBody)" } else { "API result was null." }
+                    Write-Warning "`rEscape room API call failed. $errorDetail"
+                    [void]$ConversationHistoryRef.Value.Add(@{role = 'model'; parts = @(@{text = "[Escape Room Error] API call failed. $errorDetail"})})
+                    $gameEnded = $true
+                }
+            } # End while game not ended
+            return $cmdRes
+        }
+        '^/adventuregame(\s+(.+))?$' {
+            $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $true
+            Write-Host "`n--- Starting Adventure Game ---" -ForegroundColor Magenta
+
+            $adventureTheme = "a classic fantasy setting with dragons and treasure" # Default theme
+            if ($Matches[2]) {
+                $adventureTheme = $Matches[2].Trim()
+            } else {
+                Write-Host "No theme specified. Asking Gemini for some ideas..." -F DarkGray
+                $themeSuggestionPrompt = "Suggest 3-5 diverse and interesting themes for a text-based choose-your-own-adventure game. Present them as a numbered list. For example: '1. A thrilling spy mission in modern-day Paris.' or '2. Surviving a zombie apocalypse in a deserted shopping mall.'"
+                $themeInvokeParams = @{
+                    ApiKey              = $ApiKey
+                    Model               = $sessionConfig.Model # Use the current session model
+                    TimeoutSec          = $sessionConfig.TimeoutSec
+                    MaxRetries          = $sessionConfig.MaxRetries
+                    InitialRetryDelaySec = $sessionConfig.InitialRetryDelaySec
+                    Prompt              = $themeSuggestionPrompt
+                    ConversationHistory = @() # Fresh history for this one-off request
+                }
+                if ($sessionConfig.GenerationConfig) { $themeInvokeParams.GenerationConfig = $sessionConfig.GenerationConfig }
+
+                $apiThemeResult = $null
+                try { $apiThemeResult = Invoke-GeminiApi @themeInvokeParams } catch { Write-Warning "Error getting theme suggestions: $($_.Exception.Message)" }
+
+                $suggestedThemes = [System.Collections.ArrayList]::new()
+                if ($apiThemeResult -and $apiThemeResult.Success -and -not [string]::IsNullOrWhiteSpace($apiThemeResult.GeneratedText)) {
+                    Write-Host "Gemini suggests these themes:" -F Green
+                    Write-Host $apiThemeResult.GeneratedText -F Green
+                    # Basic parsing of numbered list (assumes "N. Theme text")
+                    $apiThemeResult.GeneratedText -split '\r?\n' | ForEach-Object {
+                        if ($_ -match '^\s*\d+\.\s*(.+)') { [void]$suggestedThemes.Add($Matches[1].Trim()) }
+                    }
+                } else {
+                    Write-Warning "Could not get theme suggestions from Gemini. You can enter your own or use the default."
+                }
+
+                $promptMessage = "Enter a theme (e.g., 'space exploration'), choose a number from suggestions, press Enter for default '$adventureTheme', or /back to cancel"
+                $customThemeInput = Read-Host $promptMessage
+
+                if ($customThemeInput.Trim().ToLowerInvariant() -eq '/back') { Write-Host "(Adventure game cancelled)" -F Gray; return $cmdRes }
+
+                if ($customThemeInput -match '^\d+$' -and [int]$customThemeInput -ge 1 -and [int]$customThemeInput -le $suggestedThemes.Count) {
+                    $adventureTheme = $suggestedThemes[[int]$customThemeInput - 1]
+                    Write-Host "Selected theme: '$adventureTheme'" -F Yellow
+                } elseif (-not [string]::IsNullOrWhiteSpace($customThemeInput)) {
+                    $adventureTheme = $customThemeInput.Trim()
+                }
+                # If input was empty, $adventureTheme remains the default
+            }
+            Write-Host "Theme: '$adventureTheme'. Type '/exit' during your turn to end the game." -F Yellow
+
+            $systemPrompt = @"
+You are a Text Adventure Game Master.
+The player has chosen the theme: '$adventureTheme'.
+
+Your role is to guide the player through an interactive story that is engaging, coherent, and ultimately winnable.
+
+**Your Turn Structure:**
+1.  **Describe the Scene:** Vividly describe the current situation, environment, any characters, and relevant objects or events.
+2.  **Present Choices:** Offer 2 to 4 clearly numbered choices (e.g., "1. Open the door.", "2. Examine the chest."). Each choice should lead to a distinct and meaningful consequence.
+3.  **Acknowledge Previous Choice (Optional but good):** Briefly acknowledge the player's last choice if it makes sense narratively.
+
+**Game Endings:**
+*   **WIN:** If the player makes choices that lead to successfully completing the adventure's main objective, clearly state "CONGRATULATIONS, YOU WIN!" and provide a satisfying concluding narrative.
+*   **GAME OVER:** If the player makes choices that lead to a definitive failure (e.g., character death, irreversible bad outcome), clearly state "GAME OVER." and briefly explain the reason.
+
+**Important Rules:**
+*   **Winnable Path:** Always ensure there is a logical sequence of choices that leads to a win.
+*   **Stay In Character:** Do not break character or provide meta-commentary unless it's part of the game's narrative (e.g., a mysterious narrator).
+*   **Clarity:** Make the choices and their potential immediate implications clear.
+*   **Progression:** The story must progress with each choice. Avoid loops unless they are a specific puzzle.
+*   **No External Knowledge:** Base the story only on the theme provided and the player's choices within the game. Do not ask the player for external input beyond their choice number.
+*   **Response Format:** Respond ONLY with the game narrative and the numbered choices. Do not include conversational pleasantries like "What would you like to do?".
+
+Let's begin the adventure! Based on the theme '$adventureTheme', present the very first scene and choices.
+"@
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "/adventuregame theme: $adventureTheme"}) })
+
+            $adventureGameApiHistory = [System.Collections.ArrayList]::new() # History for Invoke-GeminiApi context
+            $currentAdventurePrompt = $systemPrompt
+            $gameEnded = $false
+
+            while (-not $gameEnded) {
+                $invokeParams = @{
+                    ApiKey              = $ApiKey
+                    Model               = $sessionConfig.Model
+                    TimeoutSec          = $sessionConfig.TimeoutSec
+                    MaxRetries          = $sessionConfig.MaxRetries
+                    InitialRetryDelaySec = $sessionConfig.InitialRetryDelaySec
+                    Prompt              = $currentAdventurePrompt
+                    ConversationHistory = $adventureGameApiHistory
+                }
+                if ($sessionConfig.GenerationConfig) { $invokeParams.GenerationConfig = $sessionConfig.GenerationConfig }
+
+                Write-Host "`nGame Master (Thinking...)" -NoNewline -F DarkGray
+                $apiGameResult = $null
+                try { $apiGameResult = Invoke-GeminiApi @invokeParams }
+                catch { Write-Warning "`rError during adventure game API call: $($_.Exception.Message)";[void]$ConversationHistoryRef.Value.Add(@{role = 'model'; parts = @(@{text = "[Adventure Game Error] $($_.Exception.Message)"})});$gameEnded = $true;continue }
+                finally { Write-Host "`r" + (' ' * ($Host.UI.RawUI.WindowSize.Width - 1)) + "`r" -NoNewline }
+
+                if ($apiGameResult -and $apiGameResult.Success) {
+                    $gameMasterResponse = $apiGameResult.GeneratedText
+                    Write-Host "`rGame Master:" -F Green; Write-Host $gameMasterResponse -F Green
+                    [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = "[Adventure Game] $gameMasterResponse"}) })
+                    $adventureGameApiHistory = $apiGameResult.UpdatedConversationHistory
+
+                    if ($gameMasterResponse -match "GAME OVER." -or $gameMasterResponse -match "CONGRATULATIONS, YOU WIN!") { Write-Host "--- Adventure Game Ended ---" -F Magenta;$gameEnded = $true;continue }
+
+                    $playerChoiceInput = $null
+                    while ($true) {
+                        $playerChoiceInput = Read-Host "`nYour Choice (enter number, or /exit to end game, or /back to re-enter choice)"
+                        if ($playerChoiceInput.Trim().ToLowerInvariant() -eq '/exit') { Write-Host "Exiting adventure game." -F Yellow;[void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "[Adventure Game] /exit"}) });$gameEnded = $true;break }
+                        if ($playerChoiceInput.Trim().ToLowerInvariant() -eq '/back') { Write-Host "(Re-enter choice)" -F Gray; continue }
+                        if ($playerChoiceInput -match '^\d+$' -or -not [string]::IsNullOrWhiteSpace($playerChoiceInput)) { break } # Allow free text or numbers
+                        Write-Warning "Please enter a choice number, /exit, or /back."
+                    }
+                    if ($gameEnded) { continue }
+                    $currentAdventurePrompt = "My choice is: $($playerChoiceInput.Trim())"
+                    [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "[Adventure Game] Choice: $($playerChoiceInput.Trim())"}) })
+                } else {
+                    $errorDetail = if ($apiGameResult) { "Status: $($apiGameResult.StatusCode), Error: $($apiGameResult.ErrorRecord.Exception.Message), Body: $($apiGameResult.ResponseBody)" } else { "API result was null." }
+                    Write-Warning "`rAdventure game API call failed. $errorDetail"
+                    [void]$ConversationHistoryRef.Value.Add(@{role = 'model'; parts = @(@{text = "[Adventure Game Error] API call failed. $errorDetail"})})
+                    $gameEnded = $true
+                }
+            } # End while game not ended
+            return $cmdRes
+        }
+        '^/cointoss$' {
+            $cmdRes.CommandExecuted = $true; $cmdRes.SkipApiCall = $true # Local command
+            $result = if ((Get-Random -Minimum 0 -Maximum 2) -eq 0) { "Heads" } else { "Tails" }
+            $outputText = "Coin toss result: $result"
+            Write-Host "`n$outputText" -F Green
+            # Add to main conversation history
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'user'; parts = @(@{text = "/cointoss"}) })
+            [void]$ConversationHistoryRef.Value.Add(@{ role = 'model'; parts = @(@{text = $outputText}) })
+        }
          '^/help$' {
             # Display Help Text
             Write-Host "`n--- Available Commands ---" -ForegroundColor Yellow
@@ -787,6 +1038,8 @@ function Handle-ChatCommand {
             Write-Host "  /generate ... - Generate an image via Vertex AI. Prompts if prompt is missing." -ForegroundColor Cyan
             Write-Host "  /generate_from <path> - Describe image(s) at <path>, then generate new image(s). Prompts if path is missing or uses session media." -ForegroundColor Cyan
             Write-Host "  /model [name] - Change the Gemini model. If no name, shows list." -ForegroundColor Cyan
+            Write-Host "  /adventuregame [theme] - Start an interactive choose-your-own-adventure game." -ForegroundColor Cyan
+            Write-Host "  /escaperoom [theme] - Start an interactive escape room game." -ForegroundColor Cyan
             Write-Host "  /imagemodel [name] - Change the Vertex AI image generation model. If no name, shows list." -ForegroundColor Cyan
             Write-Host "  /simulatechat [initial_prompt] - Start a role-playing simulation. Prompts for personas and turns." -ForegroundColor Cyan
             Write-Host "  /tellajoke    - Ask Gemini to tell a joke." -ForegroundColor Cyan

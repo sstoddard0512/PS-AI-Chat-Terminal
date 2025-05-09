@@ -256,3 +256,33 @@ Each platform has its own interface and prompts, but you can generally paste you
 
 
 
+
+
+--- Turn 11.5 (05/08/2025 15:20:11) ---
+You:
+Tell me a joke.
+
+Gemini:
+Why don't scientists trust atoms? 
+
+Because they make up everything!
+
+
+
+
+
+
+
+--- Turn 1 (05/08/2025 16:37:59) - API ERROR ---
+You:
+describe
+
+ERROR:
+Status: Err:Failed to upload large file 'Metallica - Opening.mp4'. Error: The request was canceled due to the configured HttpClient.Timeout of 600 seconds elapsing. Body:
+---
+
+
+
+
+
+
