@@ -27,7 +27,7 @@ Write-Host "`n--- Setting up Example Variables ---" -ForegroundColor Gray
 # Define default values for example calls.
 $examplePrompt = @"
 No other text, Analyze the provided file:
-1. Name: (Suggest emotional descriptive filename, 5-10 words, underscores for spaces)
+1. Name: (Suggest emotional descriptive filename, 5 words, underscores for spaces)
 2. Description: (Suggest emotional description, 100-500 words)
 3. Rating: (Suggest 0-5 quality rating)
 4. Tags: (Suggest 30-50 keywords: main subject, elements, location, actions, concepts, demographics, technical, format)
